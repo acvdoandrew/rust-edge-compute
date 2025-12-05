@@ -1,0 +1,15 @@
+syntax = "proto3";
+package node;
+
+service NodeService {
+  rpc Heartbeat (HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+message HeartbeatRequest {
+  string node_id = 1;
+  float gpu_temp = 2;
+}
+
+message HeartbeatResponse {
+  bool acknowledged = 1;
+}
