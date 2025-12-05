@@ -947,6 +947,7 @@ dependencies = [
  "nvml-wrapper",
  "prost",
  "protoc-bin-vendored",
+ "rand",
  "ratatui",
  "tokio",
  "tonic",
