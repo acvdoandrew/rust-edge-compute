@@ -6,10 +6,10 @@ use tokio::time::{sleep, Duration};
 
 #[derive(Debug, Clone)]
 pub struct GpuStats {
-    id: String,
-    temperature: f32,
-    usage: f32,
-    vram_used: u64,
+    pub id: String,
+    pub temperature: f32,
+    pub usage: f32,
+    pub vram_used: u64,
 }
 
 impl fmt::Display for GpuStats {

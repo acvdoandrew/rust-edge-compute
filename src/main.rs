@@ -1,14 +1,17 @@
-use std::io;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{Event, KeyCode};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 
-use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::{
+    layout::{Alignment, Constraint, Direction, Layout},
+    prelude::*,
+    style::{Color, Style},
+    widgets::{Block, Borders, Gauge, Paragraph},
+};
 
 use tokio::sync::mpsc;
 
@@ -39,9 +42,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // DRAW PHASE
         terminal.draw(|frame| ui(frame, &app_state))?;
 
-        if crossterm::event::poll(std::time::Duration::from_millis(16))? {
-            if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
-                if key.code == crossterm::event::KeyCode::Char('q') {
+        if crossterm::event::poll(Duration::from_millis(16))? {
+            if let Event::Key(key) = crossterm::event::read()? {
+                if key.code == KeyCode::Char('q') {
                     app_state.should_quit = true;
                 }
             }
@@ -84,22 +87,30 @@ fn setup_terminal(
 }
 
 fn ui(frame: &mut ratatui::Frame, state: &AppState) {
-    let size = frame.size();
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(frame.size());
 
-    let status_text = match &state.latest_stats {
-        Some(stats) => format!("{}", stats),
-        None => "Waiting for telemetry...".to_string(),
+    let (text_content, usage_ratio) = match &state.latest_stats {
+        Some(stats) => (format!("{}", stats), stats.usage as f64),
+
+        None => ("Initializing...".to_string(), 0.0),
     };
 
-    let paragraph = ratatui::widgets::Paragraph::new(status_text)
-        .block(
-            ratatui::widgets::Block::default()
-                .title(" Edge Compute Node ")
-                .borders(ratatui::widgets::Borders::ALL),
-        )
-        .alignment(ratatui::layout::Alignment::Center);
+    let paragraph = Paragraph::new(text_content)
+        .block(Block::default().title(" Telemetry ").borders(Borders::ALL))
+        .alignment(Alignment::Center);
 
-    frame.render_widget(paragraph, size);
+    frame.render_widget(paragraph, chunks[0]);
+
+    let gauge = Gauge::default()
+        .block(Block::default().title(" GPU Load ").borders(Borders::ALL))
+        .gauge_style(Style::default().fg(Color::Cyan))
+        .ratio(usage_ratio);
+
+    frame.render_widget(gauge, chunks[1]);
 }
 
 fn restore_terminal() -> Result<(), Box<dyn std::error::Error>> {
