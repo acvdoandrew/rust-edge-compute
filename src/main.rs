@@ -31,6 +31,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (tx, mut rx) = mpsc::channel(32);
     tokio::spawn(telemetry::run_monitoring_agent(tx));
 
+    tokio::spawn(client::start_client());
+
     let mut terminal = setup_terminal()?;
 
     let mut app_state = AppState {
