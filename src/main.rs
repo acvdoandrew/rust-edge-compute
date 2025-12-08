@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 Listening to telemetry...");
 
     while let Some(data) = rx.recv().await {
-        println!("Received: {:?}", data);
+        println!("Received: {}", data);
     }
 
     println!("Telemetry stream ended");

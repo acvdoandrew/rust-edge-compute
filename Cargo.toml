@@ -9,7 +9,8 @@ tonic = "0.10"
 prost = "0.12"
 nvml-wrapper = "0.9"
 anyhow = "1.0"
-ratatui = "0.24"
+ratatui = "0.26"
+crossterm = "0.27"
 rand = "0.8"
 
 [build-dependencies]
