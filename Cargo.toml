@@ -7,6 +7,7 @@ edition = "2021"
 tokio = { version = "1", features = ["full"] }
 tonic = "0.10"
 prost = "0.12"
+dashmap = "5.5"
 nvml-wrapper = "0.9"
 anyhow = "1.0"
 ratatui = "0.26"
