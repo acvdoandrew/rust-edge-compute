@@ -85,11 +85,21 @@ fn setup_terminal(
 
 fn ui(frame: &mut ratatui::Frame, state: &AppState) {
     let size = frame.size();
-    let block = ratatui::widgets::Block::default()
-        .title(" Edge Compute Node ")
-        .borders(ratatui::widgets::Borders::ALL);
 
-    frame.render_widget(block, size);
+    let status_text = match &state.latest_stats {
+        Some(stats) => format!("{}", stats),
+        None => "Waiting for telemetry...".to_string(),
+    };
+
+    let paragraph = ratatui::widgets::Paragraph::new(status_text)
+        .block(
+            ratatui::widgets::Block::default()
+                .title(" Edge Compute Node ")
+                .borders(ratatui::widgets::Borders::ALL),
+        )
+        .alignment(ratatui::layout::Alignment::Center);
+
+    frame.render_widget(paragraph, size);
 }
 
 fn restore_terminal() -> Result<(), Box<dyn std::error::Error>> {
