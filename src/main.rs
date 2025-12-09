@@ -1,3 +1,4 @@
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::{Event, KeyCode};
@@ -31,7 +32,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (tx, mut rx) = mpsc::channel(32);
     tokio::spawn(telemetry::run_monitoring_agent(tx));
 
-    tokio::spawn(client::start_client());
+    let shared_state = Arc::new(Mutex::new(None));
+
+    let client_state = shared_state.clone();
+    tokio::spawn(client::start_client(client_state));
 
     let mut terminal = setup_terminal()?;
 
@@ -54,7 +58,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         match rx.try_recv() {
             Ok(stats) => {
-                app_state.latest_stats = Some(stats);
+                app_state.latest_stats = Some(stats.clone());
+
+                let mut lock = shared_state.lock().unwrap();
+                *lock = Some(stats);
             }
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
                 // No data yet, we do nothing.

@@ -1,3 +1,6 @@
+use crate::telemetry::GpuStats;
+use std::sync::{Arc, Mutex};
+
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -8,38 +11,33 @@ pub mod node {
 use node::node_service_client::NodeServiceClient;
 use node::HeartbeatRequest;
 
-pub async fn start_client() {
-    println!("📡 Client connecting to Orchestrator...");
-
+pub async fn start_client(state: Arc<Mutex<Option<GpuStats>>>) {
     loop {
         match NodeServiceClient::connect("http://[::1]:50051").await {
             Ok(mut client) => {
-                println!("✅ Connected to Orchestrator!");
-
                 // Inner loop
                 loop {
+                    let temp = {
+                        let lock = state.lock().unwrap();
+                        match &*lock {
+                            Some(s) => s.temperature,
+                            None => 0.0,
+                        }
+                    };
+
                     let request = tonic::Request::new(HeartbeatRequest {
                         node_id: "Node-01".to_string(),
-
-                        gpu_temp: 65.0,
+                        gpu_temp: temp,
                     });
 
-                    match client.heartbeat(request).await {
-                        Ok(_) => {
-                            // It works, silent success as I don't want to spam TUI logs
-                        }
-                        Err(e) => {
-                            println!("❌ Heartbeat failed: {}", e);
-                            break; // We break inner loop and trigger a reconnect
-                        }
+                    if let Err(_) = client.heartbeat(request).await {
+                        break;
                     }
 
-                    sleep(Duration::from_secs(2)).await;
+                    sleep(Duration::from_secs(2)).await
                 }
             }
-            Err(e) => {
-                // Server could be offline, wait and retry
-                println!("⚠️ Connection failed: {}. Retrying in 5s...", e);
+            Err(_) => {
                 sleep(Duration::from_secs(5)).await;
             }
         }
