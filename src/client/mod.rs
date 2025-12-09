@@ -11,7 +11,7 @@ pub mod node {
 use node::node_service_client::NodeServiceClient;
 use node::HeartbeatRequest;
 
-pub async fn start_client(state: Arc<Mutex<Option<GpuStats>>>) {
+pub async fn start_client(state: Arc<Mutex<Option<GpuStats>>>, node_id: String) {
     loop {
         match NodeServiceClient::connect("http://[::1]:50051").await {
             Ok(mut client) => {
@@ -26,7 +26,7 @@ pub async fn start_client(state: Arc<Mutex<Option<GpuStats>>>) {
                     };
 
                     let request = tonic::Request::new(HeartbeatRequest {
-                        node_id: "Node-01".to_string(),
+                        node_id: node_id.clone(),
                         gpu_temp: temp,
                     });
 

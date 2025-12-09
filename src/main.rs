@@ -7,6 +7,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 
+use rand::Rng;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout},
     prelude::*,
@@ -27,15 +28,16 @@ struct AppState {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("🚀 Edge Compute Node Initializing...");
+    let node_id = format!("Node-{}", rand::thread_rng().gen_range(1000..9999));
+    println!("🚀 Edge Compute Node Initializing ID: {}...", node_id);
 
     let (tx, mut rx) = mpsc::channel(32);
-    tokio::spawn(telemetry::run_monitoring_agent(tx));
+    tokio::spawn(telemetry::run_monitoring_agent(tx, node_id.clone()));
 
     let shared_state = Arc::new(Mutex::new(None));
 
     let client_state = shared_state.clone();
-    tokio::spawn(client::start_client(client_state));
+    tokio::spawn(client::start_client(client_state, node_id.clone()));
 
     let mut terminal = setup_terminal()?;
 

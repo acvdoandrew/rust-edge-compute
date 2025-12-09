@@ -25,10 +25,10 @@ impl fmt::Display for GpuStats {
     }
 }
 
-pub async fn run_monitoring_agent(sending_channel: mpsc::Sender<GpuStats>) {
+pub async fn run_monitoring_agent(sending_channel: mpsc::Sender<GpuStats>, node_id: String) {
     loop {
         let gpu_info = GpuStats {
-            id: String::from("GPU-0"),
+            id: node_id.clone(),
             temperature: rand::thread_rng().gen_range(40.0..90.0),
             usage: rand::thread_rng().gen_range(0.0..1.0),
             vram_used: rand::thread_rng().gen_range(1_000_000_000..24_000_000_000),
