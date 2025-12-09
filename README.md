@@ -39,7 +39,7 @@ Open a terminal and launch the control plane. It will listen on `[::1]:50051`.
 cargo run --bin server
 ```
 
-## 2. Launch Worker Nodes (Client)
+### 2. Launch Worker Nodes (Client)
 Open a **new terminal tab** (or multiple) to spin up worker nodes.
 ```bash
 cargo run --bin rust-edge-compute
@@ -65,6 +65,3 @@ cargo run --bin rust-edge-compute
 - [ ] **Orchestrator Dashboard:** Upgrade Server from stdout logs to a real-time TUI table of connected nodes.
 - [ ] **Graceful Shutdown:** Handle `Ctrl+C` signals to disconnect cleanly from the mesh.
 - [ ] **Hardware HAL:** Implement `nvml-wrapper` trait for optional real-GPU monitoring on supported Linux/NVIDIA machines.
-```
-```
-```
