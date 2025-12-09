@@ -2,15 +2,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::{Event, KeyCode};
-use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
 
 use rand::Rng;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout},
-    prelude::*,
     style::{Color, Style},
     widgets::{Block, Borders, Gauge, Paragraph},
 };
@@ -39,14 +34,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client_state = shared_state.clone();
     tokio::spawn(client::start_client(client_state, node_id.clone()));
 
-    let mut terminal = setup_terminal()?;
+    let mut terminal = ratatui::init();
 
     let mut app_state = AppState {
         should_quit: false,
         latest_stats: None,
     };
 
-    loop {
+    let app_result = loop {
         // DRAW PHASE
         terminal.draw(|frame| ui(frame, &app_state))?;
 
@@ -74,27 +69,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if app_state.should_quit {
-            break;
+            break Ok(());
         }
-    }
+    };
 
-    restore_terminal()?;
+    ratatui::restore();
     println!("Telemetry stream ended.");
-    Ok(())
-
-    // TODO: Initialize NVML
-    // TODO: Start gRPC Client
-}
-
-fn setup_terminal(
-) -> Result<Terminal<CrosstermBackend<std::io::Stdout>>, Box<dyn std::error::Error>> {
-    enable_raw_mode()?;
-
-    let mut stdout = std::io::stdout();
-
-    execute!(stdout, EnterAlternateScreen)?;
-
-    Ok(Terminal::new(CrosstermBackend::new(stdout))?)
+    app_result
 }
 
 fn ui(frame: &mut ratatui::Frame, state: &AppState) {
@@ -102,7 +83,7 @@ fn ui(frame: &mut ratatui::Frame, state: &AppState) {
         .direction(Direction::Vertical)
         .margin(1)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(frame.size());
+        .split(frame.area());
 
     let (text_content, usage_ratio) = match &state.latest_stats {
         Some(stats) => (format!("{}", stats), stats.usage as f64),
@@ -122,12 +103,4 @@ fn ui(frame: &mut ratatui::Frame, state: &AppState) {
         .ratio(usage_ratio);
 
     frame.render_widget(gauge, chunks[1]);
-}
-
-fn restore_terminal() -> Result<(), Box<dyn std::error::Error>> {
-    disable_raw_mode()?;
-
-    execute!(std::io::stdout(), LeaveAlternateScreen)?;
-
-    Ok(())
 }

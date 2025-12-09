@@ -10,7 +10,7 @@ prost = "0.12"
 dashmap = "5.5"
 nvml-wrapper = "0.9"
 anyhow = "1.0"
-ratatui = "0.26"
+ratatui = "0.29"
 crossterm = "0.27"
 rand = "0.8"
 
