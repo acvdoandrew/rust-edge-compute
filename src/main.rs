@@ -13,7 +13,6 @@ use ratatui::{
 use tokio::sync::mpsc;
 
 pub mod client;
-pub mod server;
 pub mod telemetry;
 
 struct AppState {
