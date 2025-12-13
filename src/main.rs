@@ -10,10 +10,21 @@ use ratatui::{
     widgets::{Block, Borders, Gauge, Paragraph},
 };
 
+use clap::Parser;
 use tokio::sync::mpsc;
 
 pub mod client;
 pub mod telemetry;
+
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    #[arg(short, long, default_value = "http://[::1]:50051")]
+    server_addr: String,
+
+    #[arg(short, long)]
+    node_id: Option<String>,
+}
 
 struct AppState {
     should_quit: bool,
@@ -22,7 +33,12 @@ struct AppState {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let node_id = format!("Node-{}", rand::thread_rng().gen_range(1000..9999));
+    let args = Args::parse();
+
+    let node_id = args
+        .node_id
+        .unwrap_or_else(|| format!("Node-{}", rand::thread_rng().gen_range(1000..9999)));
+
     println!("🚀 Edge Compute Node Initializing ID: {}...", node_id);
 
     let (tx, mut rx) = mpsc::channel(32);
@@ -31,7 +47,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shared_state = Arc::new(Mutex::new(None));
 
     let client_state = shared_state.clone();
-    tokio::spawn(client::start_client(client_state, node_id.clone()));
+    tokio::spawn(client::start_client(
+        client_state,
+        node_id.clone(),
+        args.server_addr,
+    ));
 
     let mut terminal = ratatui::init();
 

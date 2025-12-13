@@ -11,9 +11,13 @@ pub mod node {
 use node::node_service_client::NodeServiceClient;
 use node::HeartbeatRequest;
 
-pub async fn start_client(state: Arc<Mutex<Option<GpuStats>>>, node_id: String) {
+pub async fn start_client(
+    state: Arc<Mutex<Option<GpuStats>>>,
+    node_id: String,
+    server_addr: String,
+) {
     loop {
-        match NodeServiceClient::connect("http://[::1]:50051").await {
+        match NodeServiceClient::connect(server_addr.clone()).await {
             Ok(mut client) => {
                 // Inner loop
                 loop {
