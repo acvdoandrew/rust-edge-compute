@@ -42,7 +42,11 @@ cargo run --bin server
 ### 2. Launch Worker Nodes (Client)
 Open a **new terminal tab** (or multiple) to spin up worker nodes.
 ```bash
+# Standard run (Random ID, connects to localhost)
 cargo run --bin rust-edge-compute
+
+# Custom configuration (Optional)
+cargo run --bin rust-edge-compute -- --node-id "Worker-01" --server-addr "http://127.0.0.1:50051"
 ```
 * **Observe**: The Client TUI will launch, displaying live stats.
 * **Verify**: Check the Server terminal. You will see interleaved logs confirming connection from multiple unique Node IDs.
@@ -61,7 +65,7 @@ cargo run --bin rust-edge-compute
 - [x] Dynamic Node ID Generation
 
 ### Phase 3: Polish & Systems Engineering (🚧 In Progress)
-- [ ] **CLI Configuration:** Add `clap` to parse arguments (`--server <IP>`, `--id <NAME>`).
+- [x] **CLI Configuration:** Add `clap` to parse arguments (`--server <IP>`, `--id <NAME>`).
 - [ ] **Orchestrator Dashboard:** Upgrade Server from stdout logs to a real-time TUI table of connected nodes.
 - [ ] **Graceful Shutdown:** Handle `Ctrl+C` signals to disconnect cleanly from the mesh.
 - [ ] **Hardware HAL:** Implement `nvml-wrapper` trait for optional real-GPU monitoring on supported Linux/NVIDIA machines.
