@@ -1,7 +1,12 @@
 # Rust Edge Compute Node 🦀 ⚡
 
+<div>
+  <video src="https://github.com/user-attachments/assets/605a6683-45a5-4121-ba8e-5dd271bf3ce1" width="100%"></video>  
+</div>
+
 > A fault-tolerant, distributed compute agent built with Rust, Tokio, and gRPC.
 > Simulates a decentralized GPU cluster where worker nodes report telemetry to a central control plane.
+
 
 ## 🏗 Architecture
 
