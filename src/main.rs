@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crossterm::event::{Event, KeyCode};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
 use rand::Rng;
 use ratatui::{
@@ -11,7 +11,7 @@ use ratatui::{
 };
 
 use clap::Parser;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 pub mod client;
 pub mod telemetry;
@@ -19,16 +19,21 @@ pub mod telemetry;
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    #[arg(short, long, default_value = "http://[::1]:50051")]
+    #[arg(short = 's', long = "server", default_value = "http://[::1]:50051")]
     server_addr: String,
 
-    #[arg(short, long)]
+    #[arg(short = 'i', long = "id")]
     node_id: Option<String>,
 }
 
 struct AppState {
     should_quit: bool,
     latest_stats: Option<telemetry::GpuStats>,
+}
+
+fn is_quit_key(key: KeyEvent) -> bool {
+    key.code == KeyCode::Char('q')
+        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
 }
 
 #[tokio::main]
@@ -41,17 +46,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("🚀 Edge Compute Node Initializing ID: {}...", node_id);
 
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (tx, mut rx) = mpsc::channel(32);
-    tokio::spawn(telemetry::run_monitoring_agent(tx, node_id.clone()));
+    let telemetry_task = tokio::spawn(telemetry::run_monitoring_agent(
+        tx,
+        node_id.clone(),
+        shutdown_rx.clone(),
+    ));
 
     let shared_state = Arc::new(Mutex::new(None));
 
     let client_state = shared_state.clone();
-    tokio::spawn(client::start_client(
+    let client_task = tokio::spawn(client::start_client(
         client_state,
         node_id.clone(),
         args.server_addr,
+        shutdown_rx.clone(),
     ));
+
+    let signal_shutdown_tx = shutdown_tx.clone();
+    let signal_task = tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            let _ = signal_shutdown_tx.send(true);
+        }
+    });
 
     let mut terminal = ratatui::init();
 
@@ -60,13 +78,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         latest_stats: None,
     };
 
-    let app_result = loop {
+    let app_result: Result<(), Box<dyn std::error::Error>> = loop {
         // DRAW PHASE
         terminal.draw(|frame| ui(frame, &app_state))?;
 
+        if *shutdown_rx.borrow() {
+            app_state.should_quit = true;
+        }
+
         if crossterm::event::poll(Duration::from_millis(16))? {
             if let Event::Key(key) = crossterm::event::read()? {
-                if key.code == KeyCode::Char('q') {
+                if is_quit_key(key) {
+                    let _ = shutdown_tx.send(true);
                     app_state.should_quit = true;
                 }
             }
@@ -92,7 +115,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    let _ = shutdown_tx.send(true);
     ratatui::restore();
+
+    signal_task.abort();
+    if let Err(err) = telemetry_task.await {
+        return Err(Box::new(err) as Box<dyn std::error::Error>);
+    }
+    if let Err(err) = client_task.await {
+        return Err(Box::new(err) as Box<dyn std::error::Error>);
+    }
+
     println!("Telemetry stream ended.");
     app_result
 }

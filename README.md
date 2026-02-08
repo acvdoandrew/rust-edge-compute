@@ -51,10 +51,24 @@ Open a **new terminal tab** (or multiple) to spin up worker nodes.
 cargo run --bin rust-edge-compute
 
 # Custom configuration (Optional)
-cargo run --bin rust-edge-compute -- --node-id "Worker-01" --server-addr "http://127.0.0.1:50051"
+cargo run --bin rust-edge-compute -- --id "Worker-01" --server "http://127.0.0.1:50051"
 ```
 * **Observe**: The Client TUI will launch, displaying live stats.
-* **Verify**: Check the Server terminal. You will see interleaved logs confirming connection from multiple unique Node IDs.
+* **Verify**: Check the Server TUI table. Connected node rows and heartbeat counters should update in real time.
+
+### 3. Scripted Smoke Demo
+Run the helper script for either a live visual demo or an automated smoke run.
+
+```bash
+./scripts/smoke_live.sh tmux
+./scripts/smoke_live.sh headless
+./scripts/smoke_live.sh manual
+```
+
+Notes:
+- `tmux` mode opens a 3-pane live session (server + 2 clients).
+- `headless` mode runs a non-visual smoke test and validates startup/shutdown logs.
+- `manual` mode prints explicit multi-terminal commands.
 
 ## 🗺 Roadmap
 
@@ -71,6 +85,6 @@ cargo run --bin rust-edge-compute -- --node-id "Worker-01" --server-addr "http:/
 
 ### Phase 3: Polish & Systems Engineering (🚧 In Progress)
 - [x] **CLI Configuration:** Add `clap` to parse arguments (`--server <IP>`, `--id <NAME>`).
-- [ ] **Orchestrator Dashboard:** Upgrade Server from stdout logs to a real-time TUI table of connected nodes.
-- [ ] **Graceful Shutdown:** Handle `Ctrl+C` signals to disconnect cleanly from the mesh.
+- [x] **Orchestrator Dashboard:** Upgrade Server from stdout logs to a real-time TUI table of connected nodes.
+- [x] **Graceful Shutdown:** Handle `Ctrl+C` signals to disconnect cleanly from the mesh.
 - [ ] **Hardware HAL:** Implement `nvml-wrapper` trait for optional real-GPU monitoring on supported Linux/NVIDIA machines.

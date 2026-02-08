@@ -1,7 +1,7 @@
 use std::fmt::{self};
 
 use rand::prelude::*;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::{sleep, Duration};
 
 #[derive(Debug, Clone)]
@@ -25,8 +25,18 @@ impl fmt::Display for GpuStats {
     }
 }
 
-pub async fn run_monitoring_agent(sending_channel: mpsc::Sender<GpuStats>, node_id: String) {
+pub async fn run_monitoring_agent(
+    sending_channel: mpsc::Sender<GpuStats>,
+    node_id: String,
+    shutdown_rx: watch::Receiver<bool>,
+) {
+    let mut shutdown_rx = shutdown_rx;
+
     loop {
+        if *shutdown_rx.borrow() {
+            break;
+        }
+
         let gpu_info = GpuStats {
             id: node_id.clone(),
             temperature: rand::thread_rng().gen_range(40.0..90.0),
@@ -34,8 +44,17 @@ pub async fn run_monitoring_agent(sending_channel: mpsc::Sender<GpuStats>, node_
             vram_used: rand::thread_rng().gen_range(1_000_000_000..24_000_000_000),
         };
 
-        sending_channel.send(gpu_info).await.unwrap();
+        if sending_channel.send(gpu_info).await.is_err() {
+            break;
+        }
 
-        sleep(Duration::from_millis(1000)).await;
+        tokio::select! {
+            _ = sleep(Duration::from_millis(1000)) => {}
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() {
+                    break;
+                }
+            }
+        }
     }
 }

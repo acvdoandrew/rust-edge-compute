@@ -3,6 +3,7 @@ package node;
 
 service NodeService {
   rpc Heartbeat (HeartbeatRequest) returns (HeartbeatResponse);
+  rpc Disconnect (DisconnectRequest) returns (DisconnectResponse);
 }
 
 message HeartbeatRequest {
@@ -11,5 +12,13 @@ message HeartbeatRequest {
 }
 
 message HeartbeatResponse {
+  bool acknowledged = 1;
+}
+
+message DisconnectRequest {
+  string node_id = 1;
+}
+
+message DisconnectResponse {
   bool acknowledged = 1;
 }
