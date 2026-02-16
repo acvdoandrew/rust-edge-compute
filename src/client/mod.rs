@@ -79,6 +79,7 @@ pub async fn start_client(
                     let request = tonic::Request::new(HeartbeatRequest {
                         node_id: node_id.clone(),
                         gpu_temp: temp,
+                        ..Default::default()
                     });
 
                     if client.heartbeat(request).await.is_err() {

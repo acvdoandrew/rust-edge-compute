@@ -9,6 +9,10 @@ service NodeService {
 message HeartbeatRequest {
   string node_id = 1;
   float gpu_temp = 2;
+  float gpu_usage = 3;
+  uint64 vram_used_bytes = 4;
+  uint64 uptime_seconds = 5;
+  string client_version = 6;
 }
 
 message HeartbeatResponse {
