@@ -14,32 +14,89 @@ pub mod node {
 
 use node::job_service_client::JobServiceClient;
 use node::node_service_client::NodeServiceClient;
-use node::{DisconnectRequest, HeartbeatRequest, LeaseJobRequest, ReportJobResultRequest};
+use node::{
+    DisconnectRequest, ExtendJobLeaseRequest, HeartbeatRequest, LeaseJobRequest, LeaseJobResponse,
+    ReportJobResultRequest,
+};
 
-async fn execute_simulated_job(kind: &str, payload: &str) -> (bool, String, String) {
-    sleep(Duration::from_millis(250)).await;
+const DEFAULT_SIMULATED_JOB_DURATION: Duration = Duration::from_millis(250);
+const EXECUTION_STEP: Duration = Duration::from_millis(200);
 
-    if !kind.eq_ignore_ascii_case("simulated") {
-        return (
-            false,
-            String::new(),
-            format!("unsupported job kind: {kind}"),
-        );
+fn parse_sleep_ms(payload: &str) -> Option<u64> {
+    let marker = "sleep_ms=";
+    let start = payload.find(marker)? + marker.len();
+    let digits: String = payload[start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+
+    if digits.is_empty() {
+        return None;
     }
 
-    if payload.contains("fail") {
-        return (
+    digits.parse::<u64>().ok()
+}
+
+async fn execute_simulated_job(
+    job_client: &mut JobServiceClient<tonic::transport::Channel>,
+    worker_id: &str,
+    lease: &LeaseJobResponse,
+) -> Result<(bool, String, String), tonic::Status> {
+    if !lease.kind.eq_ignore_ascii_case("simulated") {
+        return Ok((
+            false,
+            String::new(),
+            format!("unsupported job kind: {}", lease.kind),
+        ));
+    }
+
+    let run_for = parse_sleep_ms(&lease.payload)
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_SIMULATED_JOB_DURATION);
+
+    let started_at = Instant::now();
+    let mut next_renewal_at = started_at;
+
+    while started_at.elapsed() < run_for {
+        let now = Instant::now();
+        if now >= next_renewal_at {
+            let renewal = job_client
+                .extend_job_lease(tonic::Request::new(ExtendJobLeaseRequest {
+                    worker_id: worker_id.to_string(),
+                    job_id: lease.job_id.clone(),
+                }))
+                .await?
+                .into_inner();
+
+            if renewal.cancel_requested {
+                return Ok((
+                    false,
+                    String::new(),
+                    "job cancelled by orchestrator request".to_string(),
+                ));
+            }
+
+            let renew_in_secs = (renewal.lease_timeout_seconds / 2).max(1);
+            next_renewal_at = now + Duration::from_secs(renew_in_secs);
+        }
+
+        let remaining = run_for.saturating_sub(started_at.elapsed());
+        sleep(remaining.min(EXECUTION_STEP)).await;
+    }
+
+    if lease.payload.contains("fail") {
+        return Ok((
             false,
             String::new(),
             "simulated job failed due to payload directive".to_string(),
-        );
+        ));
     }
 
-    (
+    Ok((
         true,
-        format!("simulated job completed (payload={payload})"),
+        format!("simulated job completed (payload={})", lease.payload),
         String::new(),
-    )
+    ))
 }
 
 pub async fn start_client(
@@ -129,14 +186,18 @@ pub async fn start_client(
                             Ok(response) => {
                                 let lease = response.into_inner();
                                 if lease.has_job {
-                                    eprintln!(
-                                        "leased job {} (kind={})",
-                                        lease.job_id,
-                                        lease.kind
-                                    );
+                                    eprintln!("leased job {} (kind={})", lease.job_id, lease.kind);
 
-                                    let (success, output, error) =
-                                        execute_simulated_job(&lease.kind, &lease.payload).await;
+                                    let execution_result =
+                                        execute_simulated_job(client, &node_id, &lease).await;
+
+                                    let (success, output, error) = match execution_result {
+                                        Ok(result) => result,
+                                        Err(_) => {
+                                            job_client = None;
+                                            continue;
+                                        }
+                                    };
 
                                     let report = tonic::Request::new(ReportJobResultRequest {
                                         worker_id: node_id.clone(),
