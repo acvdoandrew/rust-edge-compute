@@ -6,6 +6,22 @@ service NodeService {
   rpc Disconnect (DisconnectRequest) returns (DisconnectResponse);
 }
 
+service JobService {
+  rpc SubmitJob (SubmitJobRequest) returns (SubmitJobResponse);
+  rpc LeaseJob (LeaseJobRequest) returns (LeaseJobResponse);
+  rpc ReportJobResult (ReportJobResultRequest) returns (ReportJobResultResponse);
+  rpc GetJobStatus (GetJobStatusRequest) returns (GetJobStatusResponse);
+}
+
+enum JobRunState {
+  JOB_RUN_STATE_UNSPECIFIED = 0;
+  JOB_RUN_STATE_QUEUED = 1;
+  JOB_RUN_STATE_LEASED = 2;
+  JOB_RUN_STATE_RUNNING = 3;
+  JOB_RUN_STATE_SUCCEEDED = 4;
+  JOB_RUN_STATE_FAILED = 5;
+}
+
 message HeartbeatRequest {
   string node_id = 1;
   float gpu_temp = 2;
@@ -25,4 +41,49 @@ message DisconnectRequest {
 
 message DisconnectResponse {
   bool acknowledged = 1;
+}
+
+message SubmitJobRequest {
+  string kind = 1;
+  string payload = 2;
+}
+
+message SubmitJobResponse {
+  string job_id = 1;
+}
+
+message LeaseJobRequest {
+  string worker_id = 1;
+}
+
+message LeaseJobResponse {
+  bool has_job = 1;
+  string job_id = 2;
+  string kind = 3;
+  string payload = 4;
+  uint64 lease_timeout_seconds = 5;
+}
+
+message ReportJobResultRequest {
+  string worker_id = 1;
+  string job_id = 2;
+  bool success = 3;
+  string output = 4;
+  string error = 5;
+}
+
+message ReportJobResultResponse {
+  bool acknowledged = 1;
+}
+
+message GetJobStatusRequest {
+  string job_id = 1;
+}
+
+message GetJobStatusResponse {
+  string job_id = 1;
+  JobRunState state = 2;
+  string assigned_worker_id = 3;
+  string output = 4;
+  string error = 5;
 }
