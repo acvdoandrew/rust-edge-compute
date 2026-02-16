@@ -94,32 +94,28 @@ pub struct MyNodeService {
 fn update_node_status(
     state: &DashMap<String, NodeStatus>,
     node_id: &str,
-    gpu_temp: f32,
-    gpu_usage: f32,
-    vram_used_bytes: u64,
-    uptime_seconds: u64,
-    client_version: &str,
+    heartbeat: &HeartbeatRequest,
     now: Instant,
 ) {
     match state.entry(node_id.to_string()) {
         Entry::Occupied(mut entry) => {
             let status = entry.get_mut();
-            status.last_temp_c = gpu_temp;
-            status.last_usage = gpu_usage;
-            status.last_vram_used_bytes = vram_used_bytes;
-            status.last_uptime_seconds = uptime_seconds;
-            status.client_version = client_version.to_string();
+            status.last_temp_c = heartbeat.gpu_temp;
+            status.last_usage = heartbeat.gpu_usage;
+            status.last_vram_used_bytes = heartbeat.vram_used_bytes;
+            status.last_uptime_seconds = heartbeat.uptime_seconds;
+            status.client_version = heartbeat.client_version.clone();
             status.last_seen = now;
             status.heartbeat_count += 1;
         }
         Entry::Vacant(entry) => {
             entry.insert(NodeStatus {
                 node_id: node_id.to_string(),
-                last_temp_c: gpu_temp,
-                last_usage: gpu_usage,
-                last_vram_used_bytes: vram_used_bytes,
-                last_uptime_seconds: uptime_seconds,
-                client_version: client_version.to_string(),
+                last_temp_c: heartbeat.gpu_temp,
+                last_usage: heartbeat.gpu_usage,
+                last_vram_used_bytes: heartbeat.vram_used_bytes,
+                last_uptime_seconds: heartbeat.uptime_seconds,
+                client_version: heartbeat.client_version.clone(),
                 last_seen: now,
                 heartbeat_count: 1,
             });
@@ -140,7 +136,11 @@ fn node_health(last_seen: Instant, now: Instant, stale_after: Duration) -> NodeH
     }
 }
 
-fn prune_stale_nodes(state: &DashMap<String, NodeStatus>, now: Instant, evict_after: Duration) -> usize {
+fn prune_stale_nodes(
+    state: &DashMap<String, NodeStatus>,
+    now: Instant,
+    evict_after: Duration,
+) -> usize {
     let keys_to_remove: Vec<String> = state
         .iter()
         .filter_map(|entry| {
@@ -247,7 +247,10 @@ fn render_dashboard(frame: &mut ratatui::Frame, snapshot: &DashboardSnapshot) {
             Cell::from(row.node_id.clone()),
             Cell::from(format!("{:.1}", row.last_temp_c)),
             Cell::from(format!("{:.0}%", row.last_usage * 100.0)),
-            Cell::from(format!("{:.2}", row.last_vram_used_bytes as f64 / 1_073_741_824.0)),
+            Cell::from(format!(
+                "{:.2}",
+                row.last_vram_used_bytes as f64 / 1_073_741_824.0
+            )),
             Cell::from(format!("{}s", row.last_uptime_seconds)),
             Cell::from(format!("{}s ago", row.last_seen_secs)),
             Cell::from(row.health.as_str()).style(status_style),
@@ -326,8 +329,11 @@ async fn run_dashboard_loop(
             break;
         }
 
-        total_evicted_nodes = total_evicted_nodes
-            .saturating_add(prune_stale_nodes(&state, Instant::now(), EVICT_AFTER) as u64);
+        total_evicted_nodes = total_evicted_nodes.saturating_add(prune_stale_nodes(
+            &state,
+            Instant::now(),
+            EVICT_AFTER,
+        ) as u64);
 
         let snapshot = build_dashboard_snapshot(
             &state,
@@ -359,16 +365,7 @@ impl NodeService for MyNodeService {
         let req = request.into_inner();
         let now = Instant::now();
 
-        update_node_status(
-            &self.state,
-            &req.node_id,
-            req.gpu_temp,
-            req.gpu_usage,
-            req.vram_used_bytes,
-            req.uptime_seconds,
-            &req.client_version,
-            now,
-        );
+        update_node_status(&self.state, &req.node_id, &req, now);
         self.total_heartbeats.fetch_add(1, Ordering::Relaxed);
 
         Ok(Response::new(HeartbeatResponse { acknowledged: true }))
@@ -448,14 +445,42 @@ async fn main() -> Result<(), Box<dyn Error>> {
 mod tests {
     use super::*;
 
+    fn heartbeat(
+        node_id: &str,
+        gpu_temp: f32,
+        gpu_usage: f32,
+        vram_used_bytes: u64,
+        uptime_seconds: u64,
+        client_version: &str,
+    ) -> HeartbeatRequest {
+        HeartbeatRequest {
+            node_id: node_id.to_string(),
+            gpu_temp,
+            gpu_usage,
+            vram_used_bytes,
+            uptime_seconds,
+            client_version: client_version.to_string(),
+        }
+    }
+
     #[test]
     fn update_node_status_inserts_and_updates_existing_node() {
         let state = DashMap::new();
         let first = Instant::now();
         let second = first + Duration::from_secs(2);
 
-        update_node_status(&state, "Node-1", 63.5, 0.44, 2_000_000_000, 120, "0.1.0", first);
-        update_node_status(&state, "Node-1", 71.2, 0.86, 4_000_000_000, 122, "0.1.0", second);
+        update_node_status(
+            &state,
+            "Node-1",
+            &heartbeat("Node-1", 63.5, 0.44, 2_000_000_000, 120, "0.1.0"),
+            first,
+        );
+        update_node_status(
+            &state,
+            "Node-1",
+            &heartbeat("Node-1", 71.2, 0.86, 4_000_000_000, 122, "0.1.0"),
+            second,
+        );
 
         let node = state.get("Node-1").expect("node should exist");
         assert_eq!(node.heartbeat_count, 2);
