@@ -12,7 +12,7 @@
 
 This system uses an asynchronous **Actor Model** architecture to decouple data generation, rendering, and networking.
 
-*   **Telemetry Actor:** Generates hardware stats (Temperature, VRAM, Usage) on an independent Tokio task.
+*   **Telemetry Actor:** Streams hardware stats (Temperature, VRAM, Usage) from a pluggable source (`sim`, `nvml`, or `auto`).
 *   **TUI Actor (Main Thread):** Renders a 60 FPS terminal dashboard using `ratatui`.
 *   **Network Client:** A background gRPC worker that streams Heartbeats to the Orchestrator.
 *   **State Management:** Uses `Arc<Mutex<State>>` to share live telemetry between the rendering loop and the network client without blocking.
@@ -20,10 +20,12 @@ This system uses an asynchronous **Actor Model** architecture to decouple data g
 ## 🚀 Features
 
 *   **Distributed Orchestration:** A central Server (`bin/server`) handling concurrent connections from multiple Nodes.
-*   **High-Performance TUI:** Split-screen dashboard with real-time gauges and logs, powered by `ratatui` v0.29.
-*   **Fault Tolerance:** Client automatically attempts reconnection with exponential backoff if the Orchestrator goes down.
-*   **Dynamic Identity:** Nodes generate unique IDs at runtime (`Node-8821`), simulating a heterogeneous cluster.
-*   **Simulated HAL:** Currently uses a **Simulated Hardware Abstraction Layer** to generate realistic thermal patterns for demonstration purposes (Cross-platform compatibility).
+*   **High-Performance TUI:** Real-time client and orchestrator dashboards powered by `ratatui` v0.29.
+*   **Pluggable Telemetry HAL:** Runtime-selectable telemetry backend (`--telemetry-backend sim|nvml|auto`) with deterministic `auto` fallback.
+*   **Fault Tolerance:** Client reconnects with jittered exponential backoff (capped) and resets the backoff after a successful reconnect.
+*   **Richer Heartbeats:** Nodes send temperature, usage, VRAM bytes, uptime, and client version on every heartbeat.
+*   **Node Lifecycle Hygiene:** Orchestrator marks stale nodes, evicts long-stale entries via TTL, and tracks total evictions.
+*   **Dynamic Identity:** Nodes generate unique IDs at runtime (`Node-8821`) to simulate a heterogeneous cluster.
 
 ## 🛠 Tech Stack
 
@@ -51,10 +53,16 @@ Open a **new terminal tab** (or multiple) to spin up worker nodes.
 cargo run --bin rust-edge-compute
 
 # Custom configuration (Optional)
-cargo run --bin rust-edge-compute -- --id "Worker-01" --server "http://127.0.0.1:50051"
+cargo run --bin rust-edge-compute -- --id "Worker-01" --server "http://127.0.0.1:50051" --telemetry-backend auto
+
+# Force simulated telemetry
+cargo run --bin rust-edge-compute -- --telemetry-backend sim
+
+# Force NVML telemetry (fails fast if NVML/GPU is unavailable)
+cargo run --bin rust-edge-compute -- --telemetry-backend nvml
 ```
 * **Observe**: The Client TUI will launch, displaying live stats.
-* **Verify**: Check the Server TUI table. Connected node rows and heartbeat counters should update in real time.
+* **Verify**: Check the Server TUI table. Connected node rows, heartbeat counters, usage, VRAM, uptime, and version should update in real time.
 
 ### 3. Scripted Smoke Demo
 Run the helper script for either a live visual demo or an automated smoke run.
@@ -70,6 +78,15 @@ Notes:
 - `headless` mode runs a non-visual smoke test and validates startup/shutdown logs.
 - `manual` mode prints explicit multi-terminal commands.
 
+## ✅ Quality Gates
+
+This repository includes a GitHub Actions workflow that runs on pushes and PRs to `master`:
+
+- `cargo fmt --all -- --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test --all-targets --all-features`
+- `./scripts/smoke_live.sh headless`
+
 ## 🗺 Roadmap
 
 ### Phase 1: Foundation (✅ Completed)
@@ -83,8 +100,12 @@ Notes:
 - [x] Thread-safe State Synchronization (`Arc<Mutex>`)
 - [x] Dynamic Node ID Generation
 
-### Phase 3: Polish & Systems Engineering (🚧 In Progress)
+### Phase 3: Polish & Systems Engineering (✅ Completed)
 - [x] **CLI Configuration:** Add `clap` to parse arguments (`--server <IP>`, `--id <NAME>`).
 - [x] **Orchestrator Dashboard:** Upgrade Server from stdout logs to a real-time TUI table of connected nodes.
 - [x] **Graceful Shutdown:** Handle `Ctrl+C` signals to disconnect cleanly from the mesh.
-- [ ] **Hardware HAL:** Implement `nvml-wrapper` trait for optional real-GPU monitoring on supported Linux/NVIDIA machines.
+- [x] **Hardware HAL:** Implement `nvml-wrapper` telemetry source with runtime backend selection and `auto` fallback.
+- [x] **Reconnect Backoff:** Replace fixed retry delay with exponential backoff + jitter + reset-on-success.
+- [x] **Protocol Expansion:** Extend heartbeat payload to include usage, VRAM, uptime, and client version.
+- [x] **Stale Eviction:** Add TTL-based stale node pruning with eviction counters on the orchestrator dashboard.
+- [x] **CI Pipeline:** Add formatting, lint, tests, and headless smoke checks in GitHub Actions.
