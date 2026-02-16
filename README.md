@@ -108,14 +108,24 @@ grpcurl -plaintext -import-path proto -proto node.proto \
   localhost:50051 node.JobService/GetJobStatus
 ```
 
+Submit a constrained high-priority job (example):
+
+```bash
+grpcurl -plaintext -import-path proto -proto node.proto \
+  -d '{"kind":"simulated","payload":"{\"task\":\"priority-demo\"}","requiredCapabilities":["telemetry:nvml"],"priority":"JOB_PRIORITY_HIGH"}' \
+  localhost:50051 node.JobService/SubmitJob
+```
+
 What to expect:
 - Workers poll `LeaseJob`, execute `kind=simulated`, then send `ReportJobResult`.
+- Workers advertise capabilities (for example `telemetry:simulated` or `telemetry:nvml`) during lease polling.
 - Workers renew active leases with `ExtendJobLease` while a job is running.
 - Payloads containing `fail` intentionally produce a failed simulated job result.
 - Failed jobs retry automatically (max 3 attempts) with exponential backoff (`2s`, `4s`, `8s`) before moving to `FAILED`.
+- Scheduler filters by `requiredCapabilities` and picks the highest-priority eligible jobs first (`HIGH > NORMAL > LOW`, FIFO within each priority).
 - If a worker disappears after leasing, the server requeues the job after the lease timeout (15s) so another worker can pick it up.
 - `CancelJob` is cooperative for leased/running work: queued jobs cancel immediately, active jobs move to `CANCEL_REQUESTED` and finalize to `CANCELLED` when the worker reports or when its lease expires.
-- The orchestrator TUI shows queue/run counters in `Jobs Q/L/R/S/F` and a recent jobs panel.
+- The orchestrator TUI shows queue/run counters in `Jobs Q/L/R/S/F`, queued priority mix in `Queued H/N/L`, and a recent jobs panel.
 
 Optional directives for simulated jobs:
 - Include `sleep_ms=<N>` in payload to emulate longer-running work and exercise lease renewal/cancellation behavior.
