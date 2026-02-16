@@ -11,15 +11,15 @@ print_manual_steps() {
 Manual live demo (3 terminals):
 1) Terminal A (server TUI):
    cd "${ROOT_DIR}"
-   cargo run --bin server -- --bind "${BIND_ADDR}"
+   cargo run --bin edge -- server --bind "${BIND_ADDR}"
 
 2) Terminal B (client 1):
    cd "${ROOT_DIR}"
-   cargo run --bin rust-edge-compute -- --server "${SERVER_URL}" --id Node-A
+   cargo run --bin edge -- node --server "${SERVER_URL}" --id Node-A
 
 3) Terminal C (client 2):
    cd "${ROOT_DIR}"
-   cargo run --bin rust-edge-compute -- --server "${SERVER_URL}" --id Node-B
+   cargo run --bin edge -- node --server "${SERVER_URL}" --id Node-B
 
 What to verify live:
 - Server table shows Node-A and Node-B with heartbeat counts increasing.
@@ -41,9 +41,9 @@ run_tmux_demo() {
     session_name="edge-live-$(date +%s)"
 
     local server_cmd client_a_cmd client_b_cmd
-    server_cmd="cd \"${ROOT_DIR}\" && cargo run --bin server -- --bind \"${BIND_ADDR}\""
-    client_a_cmd="cd \"${ROOT_DIR}\" && cargo run --bin rust-edge-compute -- --server \"${SERVER_URL}\" --id Node-A"
-    client_b_cmd="cd \"${ROOT_DIR}\" && cargo run --bin rust-edge-compute -- --server \"${SERVER_URL}\" --id Node-B"
+    server_cmd="cd \"${ROOT_DIR}\" && cargo run --bin edge -- server --bind \"${BIND_ADDR}\""
+    client_a_cmd="cd \"${ROOT_DIR}\" && cargo run --bin edge -- node --server \"${SERVER_URL}\" --id Node-A"
+    client_b_cmd="cd \"${ROOT_DIR}\" && cargo run --bin edge -- node --server \"${SERVER_URL}\" --id Node-B"
 
     tmux new-session -d -s "${session_name}" -n live "${server_cmd}"
     tmux split-window -h -t "${session_name}:0" "${client_a_cmd}"
@@ -91,13 +91,13 @@ run_headless_smoke() {
     (cd "${ROOT_DIR}" && cargo build --quiet)
 
     echo "[smoke] starting server..."
-    script -q -c "cd \"${ROOT_DIR}\" && cargo run --quiet --bin server -- --bind \"${BIND_ADDR}\"" "${server_log}" &
+    script -q -c "cd \"${ROOT_DIR}\" && cargo run --quiet --bin edge -- server --bind \"${BIND_ADDR}\"" "${server_log}" &
     server_pid=$!
     sleep 3
 
     echo "[smoke] running Node-SMOKE-A (INT after 8s)..."
     if timeout --preserve-status -s INT 8s \
-        script -q -c "cd \"${ROOT_DIR}\" && cargo run --quiet --bin rust-edge-compute -- --server \"${SERVER_URL}\" --id Node-SMOKE-A" \
+        script -q -c "cd \"${ROOT_DIR}\" && cargo run --quiet --bin edge -- node --server \"${SERVER_URL}\" --id Node-SMOKE-A" \
         "${client_a_log}"; then
         :
     else
@@ -112,7 +112,7 @@ run_headless_smoke() {
     sleep 2
     echo "[smoke] running Node-SMOKE-B (INT after 8s)..."
     if timeout --preserve-status -s INT 8s \
-        script -q -c "cd \"${ROOT_DIR}\" && cargo run --quiet --bin rust-edge-compute -- --server \"${SERVER_URL}\" --id Node-SMOKE-B" \
+        script -q -c "cd \"${ROOT_DIR}\" && cargo run --quiet --bin edge -- node --server \"${SERVER_URL}\" --id Node-SMOKE-B" \
         "${client_b_log}"; then
         :
     else
