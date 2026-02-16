@@ -50,18 +50,33 @@ impl TelemetryBackendArg {
 fn init_telemetry_source(
     backend: TelemetryBackendArg,
 ) -> anyhow::Result<(Box<dyn telemetry::TelemetrySource>, String)> {
+    init_telemetry_source_with_factory(backend, init_nvml_source)
+}
+
+fn init_nvml_source() -> anyhow::Result<Box<dyn telemetry::TelemetrySource>> {
+    let source = telemetry::NvmlSource::new(0)
+        .context("nvml backend requested but initialization failed")?;
+    Ok(Box::new(source))
+}
+
+fn init_telemetry_source_with_factory<F>(
+    backend: TelemetryBackendArg,
+    mut init_nvml: F,
+) -> anyhow::Result<(Box<dyn telemetry::TelemetrySource>, String)>
+where
+    F: FnMut() -> anyhow::Result<Box<dyn telemetry::TelemetrySource>>,
+{
     match backend {
         TelemetryBackendArg::Sim => Ok((
             Box::new(telemetry::SimulatedSource::new()),
             "sim".to_string(),
         )),
         TelemetryBackendArg::Nvml => {
-            let source = telemetry::NvmlSource::new(0)
-                .context("nvml backend requested but initialization failed")?;
-            Ok((Box::new(source), "nvml".to_string()))
+            let source = init_nvml()?;
+            Ok((source, "nvml".to_string()))
         }
-        TelemetryBackendArg::Auto => match telemetry::NvmlSource::new(0) {
-            Ok(source) => Ok((Box::new(source), "auto -> nvml".to_string())),
+        TelemetryBackendArg::Auto => match init_nvml() {
+            Ok(source) => Ok((source, "auto -> nvml".to_string())),
             Err(err) => Ok((
                 Box::new(telemetry::SimulatedSource::new()),
                 format!("auto -> sim (nvml unavailable: {err})"),
@@ -204,4 +219,80 @@ fn ui(frame: &mut ratatui::Frame, state: &AppState) {
         .ratio(usage_ratio);
 
     frame.render_widget(gauge, chunks[1]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::anyhow;
+
+    struct FixedSource {
+        backend: &'static str,
+    }
+
+    impl telemetry::TelemetrySource for FixedSource {
+        fn backend_name(&self) -> &'static str {
+            self.backend
+        }
+
+        fn read_stats(&mut self, node_id: &str) -> anyhow::Result<telemetry::GpuStats> {
+            Ok(telemetry::GpuStats {
+                id: node_id.to_string(),
+                temperature: 50.0,
+                usage: 0.5,
+                vram_used: 2_000_000_000,
+            })
+        }
+    }
+
+    fn fixed_source(backend: &'static str) -> Box<dyn telemetry::TelemetrySource> {
+        Box::new(FixedSource { backend })
+    }
+
+    #[test]
+    fn init_source_uses_sim_backend_without_nvml_factory() {
+        let (source, status) = init_telemetry_source_with_factory(TelemetryBackendArg::Sim, || {
+            panic!("nvml factory should not be called for sim backend")
+        })
+        .expect("sim backend should initialize");
+
+        assert_eq!(status, "sim");
+        assert_eq!(source.backend_name(), "simulated");
+    }
+
+    #[test]
+    fn init_source_fails_fast_for_explicit_nvml_backend() {
+        let result = init_telemetry_source_with_factory(TelemetryBackendArg::Nvml, || {
+            Err(anyhow!("nvml unavailable"))
+        });
+
+        assert!(result.is_err());
+        let err_text = result
+            .err()
+            .expect("explicit nvml backend should fail")
+            .to_string();
+        assert!(err_text.contains("nvml unavailable"));
+    }
+
+    #[test]
+    fn init_source_auto_falls_back_to_sim_when_nvml_unavailable() {
+        let (source, status) = init_telemetry_source_with_factory(TelemetryBackendArg::Auto, || {
+            Err(anyhow!("nvml unavailable"))
+        })
+        .expect("auto backend should fall back to simulated source");
+
+        assert_eq!(source.backend_name(), "simulated");
+        assert!(status.starts_with("auto -> sim"));
+    }
+
+    #[test]
+    fn init_source_auto_prefers_nvml_when_available() {
+        let (source, status) = init_telemetry_source_with_factory(TelemetryBackendArg::Auto, || {
+            Ok(fixed_source("nvml"))
+        })
+        .expect("auto backend should use nvml source when available");
+
+        assert_eq!(status, "auto -> nvml");
+        assert_eq!(source.backend_name(), "nvml");
+    }
 }

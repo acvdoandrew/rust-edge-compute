@@ -26,3 +26,26 @@ impl TelemetrySource for SimulatedSource {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_stats_stay_within_expected_bounds() {
+        let mut source = SimulatedSource::new();
+
+        for _ in 0..256 {
+            let stats = source
+                .read_stats("Node-Bounds")
+                .expect("simulated source should always generate stats");
+
+            assert!(stats.temperature >= 40.0);
+            assert!(stats.temperature < 90.0);
+            assert!(stats.usage >= 0.0);
+            assert!(stats.usage < 1.0);
+            assert!(stats.vram_used >= 1_000_000_000);
+            assert!(stats.vram_used < 24_000_000_000);
+        }
+    }
+}
