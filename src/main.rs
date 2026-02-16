@@ -10,7 +10,7 @@ use ratatui::{
     widgets::{Block, Borders, Gauge, Paragraph},
 };
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use tokio::sync::{mpsc, watch};
 
 pub mod client;
@@ -24,6 +24,16 @@ struct Args {
 
     #[arg(short = 'i', long = "id")]
     node_id: Option<String>,
+
+    #[arg(long = "telemetry-backend", value_enum, default_value_t = TelemetryBackendArg::Auto)]
+    telemetry_backend: TelemetryBackendArg,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum TelemetryBackendArg {
+    Sim,
+    Nvml,
+    Auto,
 }
 
 struct AppState {
@@ -45,6 +55,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| format!("Node-{}", rand::thread_rng().gen_range(1000..9999)));
 
     println!("🚀 Edge Compute Node Initializing ID: {}...", node_id);
+    println!(
+        "Telemetry backend selected: {}",
+        match args.telemetry_backend {
+            TelemetryBackendArg::Sim => "sim",
+            TelemetryBackendArg::Nvml => "nvml",
+            TelemetryBackendArg::Auto => "auto",
+        }
+    );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (tx, mut rx) = mpsc::channel(32);
