@@ -56,13 +56,11 @@ fn init_telemetry_source(
     backend: TelemetryBackendArg,
     gpu_index: u32,
 ) -> anyhow::Result<(Box<dyn telemetry::TelemetrySource>, String)> {
-    match backend {
-        TelemetryBackendArg::AmdSysfs => {
-            let source = init_amd_sysfs_source(gpu_index)?;
-            Ok((source, "amd-sysfs".to_string()))
-        }
-        _ => init_telemetry_source_with_factory(backend, || init_nvml_source(gpu_index)),
-    }
+    init_telemetry_source_with_factories(
+        backend,
+        || init_nvml_source(gpu_index),
+        || init_amd_sysfs_source(gpu_index),
+    )
 }
 
 fn init_nvml_source(gpu_index: u32) -> anyhow::Result<Box<dyn telemetry::TelemetrySource>> {
@@ -77,12 +75,14 @@ fn init_amd_sysfs_source(gpu_index: u32) -> anyhow::Result<Box<dyn telemetry::Te
     Ok(Box::new(source))
 }
 
-fn init_telemetry_source_with_factory<F>(
+fn init_telemetry_source_with_factories<F, G>(
     backend: TelemetryBackendArg,
     mut init_nvml: F,
+    mut init_amd_sysfs: G,
 ) -> anyhow::Result<(Box<dyn telemetry::TelemetrySource>, String)>
 where
     F: FnMut() -> anyhow::Result<Box<dyn telemetry::TelemetrySource>>,
+    G: FnMut() -> anyhow::Result<Box<dyn telemetry::TelemetrySource>>,
 {
     match backend {
         TelemetryBackendArg::Sim => Ok((
@@ -93,15 +93,24 @@ where
             let source = init_nvml()?;
             Ok((source, "nvml".to_string()))
         }
+        TelemetryBackendArg::AmdSysfs => {
+            let source = init_amd_sysfs()?;
+            Ok((source, "amd-sysfs".to_string()))
+        }
         TelemetryBackendArg::Auto => match init_nvml() {
             Ok(source) => Ok((source, "auto -> nvml".to_string())),
-            Err(err) => Ok((
-                Box::new(telemetry::SimulatedSource::new()),
-                format!("auto -> sim (nvml unavailable: {err})"),
-            )),
-        },
-        TelemetryBackendArg::AmdSysfs => {
-            unreachable!("amd-sysfs backend is handled in init_telemetry_source")
+            Err(nvml_err) => match init_amd_sysfs() {
+                Ok(source) => Ok((
+                    source,
+                    format!("auto -> amd-sysfs (nvml unavailable: {nvml_err})"),
+                )),
+                Err(amd_err) => Ok((
+                    Box::new(telemetry::SimulatedSource::new()),
+                    format!(
+                        "auto -> sim (nvml unavailable: {nvml_err}; amd-sysfs unavailable: {amd_err})"
+                    ),
+                )),
+            },
         }
     }
 }
@@ -277,9 +286,11 @@ mod tests {
 
     #[test]
     fn init_source_uses_sim_backend_without_nvml_factory() {
-        let (source, status) = init_telemetry_source_with_factory(TelemetryBackendArg::Sim, || {
-            panic!("nvml factory should not be called for sim backend")
-        })
+        let (source, status) = init_telemetry_source_with_factories(
+            TelemetryBackendArg::Sim,
+            || panic!("nvml factory should not be called for sim backend"),
+            || panic!("amd factory should not be called for sim backend"),
+        )
         .expect("sim backend should initialize");
 
         assert_eq!(status, "sim");
@@ -288,9 +299,11 @@ mod tests {
 
     #[test]
     fn init_source_fails_fast_for_explicit_nvml_backend() {
-        let result = init_telemetry_source_with_factory(TelemetryBackendArg::Nvml, || {
-            Err(anyhow!("nvml unavailable"))
-        });
+        let result = init_telemetry_source_with_factories(
+            TelemetryBackendArg::Nvml,
+            || Err(anyhow!("nvml unavailable")),
+            || panic!("amd factory should not be called for explicit nvml backend"),
+        );
 
         assert!(result.is_err());
         let err_text = result
@@ -302,10 +315,11 @@ mod tests {
 
     #[test]
     fn init_source_auto_falls_back_to_sim_when_nvml_unavailable() {
-        let (source, status) =
-            init_telemetry_source_with_factory(TelemetryBackendArg::Auto, || {
-                Err(anyhow!("nvml unavailable"))
-            })
+        let (source, status) = init_telemetry_source_with_factories(
+            TelemetryBackendArg::Auto,
+            || Err(anyhow!("nvml unavailable")),
+            || Err(anyhow!("amd unavailable")),
+        )
             .expect("auto backend should fall back to simulated source");
 
         assert_eq!(source.backend_name(), "simulated");
@@ -313,11 +327,25 @@ mod tests {
     }
 
     #[test]
+    fn init_source_auto_falls_back_to_amd_when_nvml_unavailable() {
+        let (source, status) = init_telemetry_source_with_factories(
+            TelemetryBackendArg::Auto,
+            || Err(anyhow!("nvml unavailable")),
+            || Ok(fixed_source("amd-sysfs")),
+        )
+        .expect("auto backend should use amd backend when nvml is unavailable");
+
+        assert_eq!(source.backend_name(), "amd-sysfs");
+        assert!(status.starts_with("auto -> amd-sysfs"));
+    }
+
+    #[test]
     fn init_source_auto_prefers_nvml_when_available() {
-        let (source, status) =
-            init_telemetry_source_with_factory(TelemetryBackendArg::Auto, || {
-                Ok(fixed_source("nvml"))
-            })
+        let (source, status) = init_telemetry_source_with_factories(
+            TelemetryBackendArg::Auto,
+            || Ok(fixed_source("nvml")),
+            || panic!("amd factory should not be called when nvml is available"),
+        )
             .expect("auto backend should use nvml source when available");
 
         assert_eq!(status, "auto -> nvml");
