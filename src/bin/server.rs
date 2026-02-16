@@ -84,14 +84,25 @@ struct NodeRow {
 #[derive(Debug, Clone)]
 struct DashboardSnapshot {
     rows: Vec<NodeRow>,
+    recent_jobs: Vec<JobRow>,
     total_nodes: usize,
     healthy_nodes: usize,
     stale_nodes: usize,
+    queued_jobs: usize,
+    leased_jobs: usize,
+    running_jobs: usize,
+    succeeded_jobs: usize,
+    failed_jobs: usize,
     total_evicted_nodes: u64,
     total_heartbeats: u64,
 }
 
-#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct JobRow {
+    job_id: String,
+    state: JobState,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum JobState {
     Queued,
@@ -102,6 +113,16 @@ enum JobState {
 }
 
 impl JobState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "Queued",
+            Self::Leased => "Leased",
+            Self::Running => "Running",
+            Self::Succeeded => "Succeeded",
+            Self::Failed => "Failed",
+        }
+    }
+
     fn as_proto(self) -> JobRunState {
         match self {
             Self::Queued => JobRunState::Queued,
@@ -262,14 +283,21 @@ fn requeue_expired_jobs(jobs: &DashMap<String, JobRecord>, now: Instant) -> usiz
 
 fn build_dashboard_snapshot(
     state: &DashMap<String, NodeStatus>,
+    jobs: &DashMap<String, JobRecord>,
     total_heartbeats: u64,
     total_evicted_nodes: u64,
     stale_after: Duration,
 ) -> DashboardSnapshot {
     let now = Instant::now();
     let mut rows = Vec::new();
+    let mut recent_jobs = Vec::new();
     let mut healthy_nodes = 0usize;
     let mut stale_nodes = 0usize;
+    let mut queued_jobs = 0usize;
+    let mut leased_jobs = 0usize;
+    let mut running_jobs = 0usize;
+    let mut succeeded_jobs = 0usize;
+    let mut failed_jobs = 0usize;
 
     for entry in state.iter() {
         let status = entry.value();
@@ -294,15 +322,39 @@ fn build_dashboard_snapshot(
         });
     }
 
+    for entry in jobs.iter() {
+        let job = entry.value();
+
+        match job.state {
+            JobState::Queued => queued_jobs += 1,
+            JobState::Leased => leased_jobs += 1,
+            JobState::Running => running_jobs += 1,
+            JobState::Succeeded => succeeded_jobs += 1,
+            JobState::Failed => failed_jobs += 1,
+        }
+
+        recent_jobs.push(JobRow {
+            job_id: job.job_id.clone(),
+            state: job.state,
+        });
+    }
+
     rows.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+    recent_jobs.sort_by(|a, b| b.job_id.cmp(&a.job_id));
 
     DashboardSnapshot {
         total_nodes: rows.len(),
         healthy_nodes,
         stale_nodes,
+        queued_jobs,
+        leased_jobs,
+        running_jobs,
+        succeeded_jobs,
+        failed_jobs,
         total_evicted_nodes,
         total_heartbeats,
         rows,
+        recent_jobs,
     }
 }
 
@@ -317,18 +369,24 @@ fn render_dashboard(frame: &mut ratatui::Frame, snapshot: &DashboardSnapshot) {
         .margin(1)
         .constraints([
             Constraint::Length(3),
-            Constraint::Min(5),
+            Constraint::Min(7),
+            Constraint::Length(6),
             Constraint::Length(3),
         ])
         .split(frame.area());
 
     let summary = Paragraph::new(format!(
-        "Active: {}  |  Stale: {}  |  Evicted: {}  |  Total Nodes: {}  |  Total Heartbeats: {}",
+        "Active: {}  |  Stale: {}  |  Evicted: {}  |  Total Nodes: {}  |  Total Heartbeats: {}  |  Jobs Q/L/R/S/F: {}/{}/{}/{}/{}",
         snapshot.healthy_nodes,
         snapshot.stale_nodes,
         snapshot.total_evicted_nodes,
         snapshot.total_nodes,
-        snapshot.total_heartbeats
+        snapshot.total_heartbeats,
+        snapshot.queued_jobs,
+        snapshot.leased_jobs,
+        snapshot.running_jobs,
+        snapshot.succeeded_jobs,
+        snapshot.failed_jobs,
     ))
     .block(
         Block::default()
@@ -391,9 +449,25 @@ fn render_dashboard(frame: &mut ratatui::Frame, snapshot: &DashboardSnapshot) {
     );
     frame.render_widget(table, chunks[1]);
 
+    let jobs_text = if snapshot.recent_jobs.is_empty() {
+        "No jobs submitted yet".to_string()
+    } else {
+        snapshot
+            .recent_jobs
+            .iter()
+            .take(3)
+            .map(|job| format!("{}  [{}]", job.job_id, job.state.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let jobs_panel = Paragraph::new(jobs_text)
+        .block(Block::default().title(" Jobs ").borders(Borders::ALL));
+    frame.render_widget(jobs_panel, chunks[2]);
+
     let footer = Paragraph::new("Press q or Ctrl+C to stop the orchestrator")
         .block(Block::default().title(" Controls ").borders(Borders::ALL));
-    frame.render_widget(footer, chunks[2]);
+    frame.render_widget(footer, chunks[3]);
 }
 
 async fn run_dashboard(
@@ -441,6 +515,7 @@ async fn run_dashboard_loop(
 
         let snapshot = build_dashboard_snapshot(
             &state,
+            &jobs,
             total_heartbeats.load(Ordering::Relaxed),
             total_evicted_nodes,
             STALE_AFTER,
@@ -820,19 +895,27 @@ mod tests {
     #[test]
     fn build_dashboard_snapshot_handles_empty_state() {
         let state = DashMap::new();
-        let snapshot = build_dashboard_snapshot(&state, 0, 0, STALE_AFTER);
+        let jobs = DashMap::new();
+        let snapshot = build_dashboard_snapshot(&state, &jobs, 0, 0, STALE_AFTER);
 
         assert_eq!(snapshot.total_nodes, 0);
         assert_eq!(snapshot.healthy_nodes, 0);
         assert_eq!(snapshot.stale_nodes, 0);
+        assert_eq!(snapshot.queued_jobs, 0);
+        assert_eq!(snapshot.leased_jobs, 0);
+        assert_eq!(snapshot.running_jobs, 0);
+        assert_eq!(snapshot.succeeded_jobs, 0);
+        assert_eq!(snapshot.failed_jobs, 0);
         assert_eq!(snapshot.total_evicted_nodes, 0);
         assert_eq!(snapshot.total_heartbeats, 0);
         assert!(snapshot.rows.is_empty());
+        assert!(snapshot.recent_jobs.is_empty());
     }
 
     #[test]
     fn build_dashboard_snapshot_sorts_rows_and_counts_health() {
         let state = DashMap::new();
+        let jobs = DashMap::new();
         let now = Instant::now();
 
         state.insert(
@@ -862,7 +945,7 @@ mod tests {
             },
         );
 
-        let snapshot = build_dashboard_snapshot(&state, 5, 2, STALE_AFTER);
+        let snapshot = build_dashboard_snapshot(&state, &jobs, 5, 2, STALE_AFTER);
 
         assert_eq!(snapshot.total_nodes, 2);
         assert_eq!(snapshot.healthy_nodes, 1);
@@ -881,6 +964,101 @@ mod tests {
         assert_eq!(snapshot.rows[1].last_vram_used_bytes, 3_000_000_000);
         assert_eq!(snapshot.rows[1].last_uptime_seconds, 40);
         assert_eq!(snapshot.rows[1].client_version, "0.1.0");
+    }
+
+    #[test]
+    fn build_dashboard_snapshot_counts_jobs_by_state() {
+        let state = DashMap::new();
+        let jobs = DashMap::new();
+        let now = Instant::now();
+
+        jobs.insert(
+            "job-000001".to_string(),
+            JobRecord {
+                job_id: "job-000001".to_string(),
+                kind: "simulated".to_string(),
+                payload: "{}".to_string(),
+                state: JobState::Queued,
+                lease: None,
+                output: None,
+                error: None,
+                created_at: now,
+                updated_at: now,
+            },
+        );
+        jobs.insert(
+            "job-000002".to_string(),
+            JobRecord {
+                job_id: "job-000002".to_string(),
+                kind: "simulated".to_string(),
+                payload: "{}".to_string(),
+                state: JobState::Leased,
+                lease: Some(JobLease {
+                    worker_id: "Worker-A".to_string(),
+                    leased_at: now,
+                    lease_timeout: Duration::from_secs(15),
+                }),
+                output: None,
+                error: None,
+                created_at: now,
+                updated_at: now,
+            },
+        );
+        jobs.insert(
+            "job-000003".to_string(),
+            JobRecord {
+                job_id: "job-000003".to_string(),
+                kind: "simulated".to_string(),
+                payload: "{}".to_string(),
+                state: JobState::Running,
+                lease: Some(JobLease {
+                    worker_id: "Worker-B".to_string(),
+                    leased_at: now,
+                    lease_timeout: Duration::from_secs(15),
+                }),
+                output: None,
+                error: None,
+                created_at: now,
+                updated_at: now,
+            },
+        );
+        jobs.insert(
+            "job-000004".to_string(),
+            JobRecord {
+                job_id: "job-000004".to_string(),
+                kind: "simulated".to_string(),
+                payload: "{}".to_string(),
+                state: JobState::Succeeded,
+                lease: None,
+                output: Some("ok".to_string()),
+                error: None,
+                created_at: now,
+                updated_at: now,
+            },
+        );
+        jobs.insert(
+            "job-000005".to_string(),
+            JobRecord {
+                job_id: "job-000005".to_string(),
+                kind: "simulated".to_string(),
+                payload: "{}".to_string(),
+                state: JobState::Failed,
+                lease: None,
+                output: None,
+                error: Some("boom".to_string()),
+                created_at: now,
+                updated_at: now,
+            },
+        );
+
+        let snapshot = build_dashboard_snapshot(&state, &jobs, 0, 0, STALE_AFTER);
+
+        assert_eq!(snapshot.queued_jobs, 1);
+        assert_eq!(snapshot.leased_jobs, 1);
+        assert_eq!(snapshot.running_jobs, 1);
+        assert_eq!(snapshot.succeeded_jobs, 1);
+        assert_eq!(snapshot.failed_jobs, 1);
+        assert_eq!(snapshot.recent_jobs[0].job_id, "job-000005");
     }
 
     #[test]
