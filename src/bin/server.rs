@@ -429,6 +429,10 @@ mod tests {
         let node = state.get("Node-1").expect("node should exist");
         assert_eq!(node.heartbeat_count, 2);
         assert_eq!(node.last_temp_c, 71.2);
+        assert!((node.last_usage - 0.86).abs() < f32::EPSILON);
+        assert_eq!(node.last_vram_used_bytes, 4_000_000_000);
+        assert_eq!(node.last_uptime_seconds, 122);
+        assert_eq!(node.client_version, "0.1.0");
         assert_eq!(node.last_seen, second);
     }
 
@@ -497,8 +501,16 @@ mod tests {
         assert_eq!(snapshot.total_heartbeats, 5);
         assert_eq!(snapshot.rows[0].node_id, "Node-A");
         assert_eq!(snapshot.rows[0].health, NodeHealth::Stale);
+        assert!((snapshot.rows[0].last_usage - 0.12).abs() < f32::EPSILON);
+        assert_eq!(snapshot.rows[0].last_vram_used_bytes, 1_000_000_000);
+        assert_eq!(snapshot.rows[0].last_uptime_seconds, 99);
+        assert_eq!(snapshot.rows[0].client_version, "0.1.0");
         assert_eq!(snapshot.rows[1].node_id, "Node-B");
         assert_eq!(snapshot.rows[1].health, NodeHealth::Healthy);
+        assert!((snapshot.rows[1].last_usage - 0.52).abs() < f32::EPSILON);
+        assert_eq!(snapshot.rows[1].last_vram_used_bytes, 3_000_000_000);
+        assert_eq!(snapshot.rows[1].last_uptime_seconds, 40);
+        assert_eq!(snapshot.rows[1].client_version, "0.1.0");
     }
 
     #[test]
