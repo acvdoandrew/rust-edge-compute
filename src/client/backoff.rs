@@ -73,3 +73,48 @@ fn scale_duration(duration: Duration, multiplier: f64) -> Duration {
     let millis = scaled_ms.max(1.0).min(u64::MAX as f64) as u64;
     Duration::from_millis(millis)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_grows_exponentially_until_cap() {
+        let mut backoff =
+            ExponentialBackoff::with_jitter(Duration::from_secs(1), Duration::from_secs(8), 0.0);
+
+        assert_eq!(backoff.next_delay(), Duration::from_secs(1));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(2));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(4));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(8));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(8));
+    }
+
+    #[test]
+    fn backoff_cap_is_hard_upper_bound() {
+        let mut backoff = ExponentialBackoff::with_jitter(
+            Duration::from_millis(250),
+            Duration::from_millis(700),
+            0.0,
+        );
+
+        assert_eq!(backoff.next_delay(), Duration::from_millis(250));
+        assert_eq!(backoff.next_delay(), Duration::from_millis(500));
+        assert_eq!(backoff.next_delay(), Duration::from_millis(700));
+        assert_eq!(backoff.next_delay(), Duration::from_millis(700));
+    }
+
+    #[test]
+    fn backoff_reset_restores_initial_delay() {
+        let mut backoff =
+            ExponentialBackoff::with_jitter(Duration::from_secs(2), Duration::from_secs(30), 0.0);
+
+        assert_eq!(backoff.next_delay(), Duration::from_secs(2));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(4));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(8));
+
+        backoff.reset();
+
+        assert_eq!(backoff.next_delay(), Duration::from_secs(2));
+    }
+}
