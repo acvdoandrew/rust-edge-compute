@@ -20,8 +20,13 @@ pub mod node {
     tonic::include_proto!("node");
 }
 
+use node::job_service_server::{JobService, JobServiceServer};
 use node::node_service_server::{NodeService, NodeServiceServer};
-use node::{DisconnectRequest, DisconnectResponse, HeartbeatRequest, HeartbeatResponse};
+use node::{
+    DisconnectRequest, DisconnectResponse, GetJobStatusRequest, GetJobStatusResponse,
+    HeartbeatRequest, HeartbeatResponse, JobRunState, LeaseJobRequest, LeaseJobResponse,
+    ReportJobResultRequest, ReportJobResultResponse, SubmitJobRequest, SubmitJobResponse,
+};
 
 const DEFAULT_BIND_ADDR: &str = "[::1]:50051";
 const STALE_AFTER: Duration = Duration::from_secs(10);
@@ -95,6 +100,18 @@ enum JobState {
     Failed,
 }
 
+impl JobState {
+    fn as_proto(self) -> JobRunState {
+        match self {
+            Self::Queued => JobRunState::Queued,
+            Self::Leased => JobRunState::Leased,
+            Self::Running => JobRunState::Running,
+            Self::Succeeded => JobRunState::Succeeded,
+            Self::Failed => JobRunState::Failed,
+        }
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct JobLease {
@@ -124,10 +141,12 @@ struct JobRecord {
     updated_at: Instant,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MyNodeService {
     state: Arc<DashMap<String, NodeStatus>>,
     total_heartbeats: Arc<AtomicU64>,
+    jobs: Arc<DashMap<String, JobRecord>>,
+    job_sequence: Arc<AtomicU64>,
 }
 
 fn update_node_status(
@@ -421,6 +440,90 @@ impl NodeService for MyNodeService {
     }
 }
 
+#[tonic::async_trait]
+impl JobService for MyNodeService {
+    async fn submit_job(
+        &self,
+        request: Request<SubmitJobRequest>,
+    ) -> Result<Response<SubmitJobResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.kind.trim().is_empty() {
+            return Err(Status::invalid_argument("job kind cannot be empty"));
+        }
+
+        let now = Instant::now();
+        let job_seq = self.job_sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        let job_id = format!("job-{job_seq:06}");
+
+        self.jobs.insert(
+            job_id.clone(),
+            JobRecord {
+                job_id: job_id.clone(),
+                kind: req.kind,
+                payload: req.payload,
+                state: JobState::Queued,
+                lease: None,
+                output: None,
+                error: None,
+                created_at: now,
+                updated_at: now,
+            },
+        );
+
+        Ok(Response::new(SubmitJobResponse { job_id }))
+    }
+
+    async fn lease_job(
+        &self,
+        _request: Request<LeaseJobRequest>,
+    ) -> Result<Response<LeaseJobResponse>, Status> {
+        Err(Status::unimplemented(
+            "job leasing is not implemented yet in this sprint step",
+        ))
+    }
+
+    async fn report_job_result(
+        &self,
+        _request: Request<ReportJobResultRequest>,
+    ) -> Result<Response<ReportJobResultResponse>, Status> {
+        Err(Status::unimplemented(
+            "job result reporting is not implemented yet in this sprint step",
+        ))
+    }
+
+    async fn get_job_status(
+        &self,
+        request: Request<GetJobStatusRequest>,
+    ) -> Result<Response<GetJobStatusResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.job_id.trim().is_empty() {
+            return Err(Status::invalid_argument("job_id cannot be empty"));
+        }
+
+        let job = self
+            .jobs
+            .get(&req.job_id)
+            .ok_or_else(|| Status::not_found(format!("job {} not found", req.job_id)))?;
+
+        let state = job.state.as_proto() as i32;
+        let assigned_worker_id = job
+            .lease
+            .as_ref()
+            .map(|lease| lease.worker_id.clone())
+            .unwrap_or_default();
+
+        Ok(Response::new(GetJobStatusResponse {
+            job_id: job.job_id.clone(),
+            state,
+            assigned_worker_id,
+            output: job.output.clone().unwrap_or_default(),
+            error: job.error.clone().unwrap_or_default(),
+        }))
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
@@ -429,10 +532,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let state = Arc::new(DashMap::new());
     let total_heartbeats = Arc::new(AtomicU64::new(0));
+    let jobs = Arc::new(DashMap::new());
+    let job_sequence = Arc::new(AtomicU64::new(0));
 
     let service = MyNodeService {
         state: state.clone(),
         total_heartbeats: total_heartbeats.clone(),
+        jobs: jobs.clone(),
+        job_sequence: job_sequence.clone(),
     };
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -440,7 +547,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let server_task = tokio::spawn(async move {
         Server::builder()
-            .add_service(NodeServiceServer::new(service))
+            .add_service(NodeServiceServer::new(service.clone()))
+            .add_service(JobServiceServer::new(service))
             .serve_with_shutdown(addr, async move {
                 while !*server_shutdown_rx.borrow() {
                     if server_shutdown_rx.changed().await.is_err() {
@@ -483,6 +591,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_service() -> MyNodeService {
+        MyNodeService {
+            state: Arc::new(DashMap::new()),
+            total_heartbeats: Arc::new(AtomicU64::new(0)),
+            jobs: Arc::new(DashMap::new()),
+            job_sequence: Arc::new(AtomicU64::new(0)),
+        }
+    }
 
     fn heartbeat(
         node_id: &str,
@@ -670,6 +787,34 @@ mod tests {
 
         assert!(removed);
         assert!(state.get("Node-X").is_none());
+    }
+
+    #[tokio::test]
+    async fn submit_and_get_job_status_returns_queued_job() {
+        let service = test_service();
+
+        let submit_response = service
+            .submit_job(Request::new(SubmitJobRequest {
+                kind: "simulated".to_string(),
+                payload: "{}".to_string(),
+            }))
+            .await
+            .expect("submit job should succeed")
+            .into_inner();
+
+        let status_response = service
+            .get_job_status(Request::new(GetJobStatusRequest {
+                job_id: submit_response.job_id.clone(),
+            }))
+            .await
+            .expect("get job status should succeed")
+            .into_inner();
+
+        assert_eq!(status_response.job_id, submit_response.job_id);
+        assert_eq!(status_response.state, JobRunState::Queued as i32);
+        assert!(status_response.assigned_worker_id.is_empty());
+        assert!(status_response.output.is_empty());
+        assert!(status_response.error.is_empty());
     }
 
     #[test]
