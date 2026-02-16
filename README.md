@@ -90,6 +90,30 @@ Telemetry backend notes:
 - `amd-sysfs` requires Linux with the `amdgpu` kernel driver and `/sys/class/drm/cardN/device` metrics.
 - `--gpu-index` defaults to `0`; increase it to target another GPU.
 
+### 4. Job Orchestration Usage (MVP)
+
+With the server and at least one worker running, submit jobs through `JobService`:
+
+```bash
+grpcurl -plaintext -import-path proto -proto node.proto \
+  -d '{"kind":"simulated","payload":"{\"task\":\"demo\"}"}' \
+  localhost:50051 node.JobService/SubmitJob
+```
+
+Use the returned `job_id` to query state:
+
+```bash
+grpcurl -plaintext -import-path proto -proto node.proto \
+  -d '{"job_id":"job-000001"}' \
+  localhost:50051 node.JobService/GetJobStatus
+```
+
+What to expect:
+- Workers poll `LeaseJob`, execute `kind=simulated`, then send `ReportJobResult`.
+- Payloads containing `fail` intentionally produce a failed simulated job result.
+- If a worker disappears after leasing, the server requeues the job after the lease timeout (15s) so another worker can pick it up.
+- The orchestrator TUI shows queue/run counters in `Jobs Q/L/R/S/F` and a recent jobs panel.
+
 ## ✅ Quality Gates
 
 This repository includes a GitHub Actions workflow that runs on pushes and PRs to `master`:
