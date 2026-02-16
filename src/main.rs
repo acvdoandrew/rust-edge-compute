@@ -37,6 +37,7 @@ struct Args {
 enum TelemetryBackendArg {
     Sim,
     Nvml,
+    AmdSysfs,
     Auto,
 }
 
@@ -45,6 +46,7 @@ impl TelemetryBackendArg {
         match self {
             Self::Sim => "sim",
             Self::Nvml => "nvml",
+            Self::AmdSysfs => "amd-sysfs",
             Self::Auto => "auto",
         }
     }
@@ -54,13 +56,23 @@ fn init_telemetry_source(
     backend: TelemetryBackendArg,
     gpu_index: u32,
 ) -> anyhow::Result<(Box<dyn telemetry::TelemetrySource>, String)> {
-    init_telemetry_source_with_factory(backend, || init_nvml_source(gpu_index))
+    match backend {
+        TelemetryBackendArg::AmdSysfs => {
+            let source = init_amd_sysfs_source(gpu_index)?;
+            Ok((source, "amd-sysfs".to_string()))
+        }
+        _ => init_telemetry_source_with_factory(backend, || init_nvml_source(gpu_index)),
+    }
 }
 
 fn init_nvml_source(gpu_index: u32) -> anyhow::Result<Box<dyn telemetry::TelemetrySource>> {
     let source = telemetry::NvmlSource::new(gpu_index)
         .context("nvml backend requested but initialization failed")?;
     Ok(Box::new(source))
+}
+
+fn init_amd_sysfs_source(_gpu_index: u32) -> anyhow::Result<Box<dyn telemetry::TelemetrySource>> {
+    anyhow::bail!("amd-sysfs backend requested but source is not implemented yet")
 }
 
 fn init_telemetry_source_with_factory<F>(
@@ -86,6 +98,9 @@ where
                 format!("auto -> sim (nvml unavailable: {err})"),
             )),
         },
+        TelemetryBackendArg::AmdSysfs => {
+            unreachable!("amd-sysfs backend is handled in init_telemetry_source")
+        }
     }
 }
 
