@@ -25,8 +25,9 @@ use node::node_service_server::{NodeService, NodeServiceServer};
 use node::{
     CancelJobRequest, CancelJobResponse, DisconnectRequest, DisconnectResponse,
     ExtendJobLeaseRequest, ExtendJobLeaseResponse, GetJobStatusRequest, GetJobStatusResponse,
-    HeartbeatRequest, HeartbeatResponse, JobRunState, LeaseJobRequest, LeaseJobResponse,
-    ReportJobResultRequest, ReportJobResultResponse, SubmitJobRequest, SubmitJobResponse,
+    HeartbeatRequest, HeartbeatResponse, JobPriority as JobPriorityProto, JobRunState,
+    LeaseJobRequest, LeaseJobResponse, ReportJobResultRequest, ReportJobResultResponse,
+    SubmitJobRequest, SubmitJobResponse,
 };
 
 const DEFAULT_BIND_ADDR: &str = "[::1]:50051";
@@ -118,6 +119,31 @@ enum JobState {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JobPriority {
+    Low,
+    Normal,
+    High,
+}
+
+impl JobPriority {
+    fn rank_for_queue(self) -> u8 {
+        match self {
+            Self::High => 0,
+            Self::Normal => 1,
+            Self::Low => 2,
+        }
+    }
+
+    fn from_proto(value: i32) -> Self {
+        match JobPriorityProto::try_from(value).unwrap_or(JobPriorityProto::Unspecified) {
+            JobPriorityProto::High => Self::High,
+            JobPriorityProto::Low => Self::Low,
+            JobPriorityProto::Normal | JobPriorityProto::Unspecified => Self::Normal,
+        }
+    }
+}
+
 impl JobState {
     fn as_str(self) -> &'static str {
         match self {
@@ -183,6 +209,7 @@ struct JobRecord {
     kind: String,
     payload: String,
     required_capabilities: Vec<String>,
+    priority: JobPriority,
     state: JobState,
     lease: Option<JobLease>,
     output: Option<String>,
@@ -649,6 +676,7 @@ impl JobService for MyNodeService {
 
         let now = Instant::now();
         let required_capabilities = normalize_capabilities(&req.required_capabilities);
+        let priority = JobPriority::from_proto(req.priority);
         let job_seq = self.job_sequence.fetch_add(1, Ordering::Relaxed) + 1;
         let job_id = format!("job-{job_seq:06}");
 
@@ -659,6 +687,7 @@ impl JobService for MyNodeService {
                 kind: req.kind,
                 payload: req.payload,
                 required_capabilities,
+                priority,
                 state: JobState::Queued,
                 lease: None,
                 output: None,
@@ -708,12 +737,13 @@ impl JobService for MyNodeService {
                     .unwrap_or(true);
 
                 if is_eligible {
-                    Some(job.job_id.clone())
+                    Some((job.priority.rank_for_queue(), job.job_id.clone()))
                 } else {
                     None
                 }
             })
             .min()
+            .map(|(_, job_id)| job_id)
         else {
             return Ok(Response::new(LeaseJobResponse {
                 has_job: false,
@@ -1314,6 +1344,7 @@ mod tests {
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
                 required_capabilities: Vec::new(),
+                priority: JobPriority::Normal,
                 state: JobState::Queued,
                 lease: None,
                 output: None,
@@ -1329,6 +1360,7 @@ mod tests {
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
                 required_capabilities: Vec::new(),
+                priority: JobPriority::Normal,
                 state: JobState::Leased,
                 lease: Some(JobLease {
                     worker_id: "Worker-A".to_string(),
@@ -1348,6 +1380,7 @@ mod tests {
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
                 required_capabilities: Vec::new(),
+                priority: JobPriority::Normal,
                 state: JobState::Running,
                 lease: Some(JobLease {
                     worker_id: "Worker-B".to_string(),
@@ -1367,6 +1400,7 @@ mod tests {
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
                 required_capabilities: Vec::new(),
+                priority: JobPriority::Normal,
                 state: JobState::Succeeded,
                 lease: None,
                 output: Some("ok".to_string()),
@@ -1382,6 +1416,7 @@ mod tests {
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
                 required_capabilities: Vec::new(),
+                priority: JobPriority::Normal,
                 state: JobState::Failed,
                 lease: None,
                 output: None,
@@ -1472,6 +1507,7 @@ mod tests {
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
                 required_capabilities: Vec::new(),
+                priority: JobPriorityProto::Unspecified as i32,
             }))
             .await
             .expect("submit job should succeed")
@@ -1501,6 +1537,7 @@ mod tests {
                 kind: "simulated".to_string(),
                 payload: "payload-1".to_string(),
                 required_capabilities: Vec::new(),
+                priority: JobPriorityProto::Unspecified as i32,
             }))
             .await
             .expect("first job submit should succeed")
@@ -1511,6 +1548,7 @@ mod tests {
                 kind: "simulated".to_string(),
                 payload: "payload-2".to_string(),
                 required_capabilities: Vec::new(),
+                priority: JobPriorityProto::Unspecified as i32,
             }))
             .await
             .expect("second job submit should succeed");
@@ -1571,6 +1609,7 @@ mod tests {
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
                 required_capabilities: vec!["GPU:NVML".to_string(), "region:us".to_string()],
+                priority: JobPriorityProto::Unspecified as i32,
             }))
             .await
             .expect("submit should succeed")
@@ -1605,6 +1644,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lease_job_prioritizes_high_then_normal_then_low() {
+        let service = test_service();
+
+        let low = service
+            .submit_job(Request::new(SubmitJobRequest {
+                kind: "simulated".to_string(),
+                payload: "low".to_string(),
+                required_capabilities: Vec::new(),
+                priority: JobPriorityProto::Low as i32,
+            }))
+            .await
+            .expect("submit low should succeed")
+            .into_inner();
+
+        let high = service
+            .submit_job(Request::new(SubmitJobRequest {
+                kind: "simulated".to_string(),
+                payload: "high".to_string(),
+                required_capabilities: Vec::new(),
+                priority: JobPriorityProto::High as i32,
+            }))
+            .await
+            .expect("submit high should succeed")
+            .into_inner();
+
+        let normal = service
+            .submit_job(Request::new(SubmitJobRequest {
+                kind: "simulated".to_string(),
+                payload: "normal".to_string(),
+                required_capabilities: Vec::new(),
+                priority: JobPriorityProto::Normal as i32,
+            }))
+            .await
+            .expect("submit normal should succeed")
+            .into_inner();
+
+        let first = service
+            .lease_job(Request::new(LeaseJobRequest {
+                worker_id: "Worker-A".to_string(),
+                worker_capabilities: Vec::new(),
+            }))
+            .await
+            .expect("first lease should succeed")
+            .into_inner();
+        assert!(first.has_job);
+        assert_eq!(first.job_id, high.job_id);
+
+        let second = service
+            .lease_job(Request::new(LeaseJobRequest {
+                worker_id: "Worker-B".to_string(),
+                worker_capabilities: Vec::new(),
+            }))
+            .await
+            .expect("second lease should succeed")
+            .into_inner();
+        assert!(second.has_job);
+        assert_eq!(second.job_id, normal.job_id);
+
+        let third = service
+            .lease_job(Request::new(LeaseJobRequest {
+                worker_id: "Worker-C".to_string(),
+                worker_capabilities: Vec::new(),
+            }))
+            .await
+            .expect("third lease should succeed")
+            .into_inner();
+        assert!(third.has_job);
+        assert_eq!(third.job_id, low.job_id);
+    }
+
+    #[tokio::test]
     async fn report_job_result_moves_leased_job_to_terminal_state() {
         let service = test_service();
 
@@ -1613,6 +1723,7 @@ mod tests {
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
                 required_capabilities: Vec::new(),
+                priority: JobPriorityProto::Unspecified as i32,
             }))
             .await
             .expect("submit should succeed")
@@ -1661,6 +1772,7 @@ mod tests {
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
                 required_capabilities: Vec::new(),
+                priority: JobPriorityProto::Unspecified as i32,
             }))
             .await
             .expect("submit should succeed")
@@ -1697,6 +1809,7 @@ mod tests {
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
                 required_capabilities: Vec::new(),
+                priority: JobPriorityProto::Unspecified as i32,
             }))
             .await
             .expect("submit should succeed")
@@ -1742,6 +1855,7 @@ mod tests {
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
                 required_capabilities: Vec::new(),
+                priority: JobPriorityProto::Unspecified as i32,
             }))
             .await
             .expect("submit should succeed")
@@ -1779,6 +1893,7 @@ mod tests {
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
                 required_capabilities: Vec::new(),
+                priority: JobPriorityProto::Unspecified as i32,
             }))
             .await
             .expect("submit should succeed")
@@ -1844,6 +1959,7 @@ mod tests {
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
                 required_capabilities: Vec::new(),
+                priority: JobPriorityProto::Unspecified as i32,
             }))
             .await
             .expect("submit should succeed")
@@ -1905,6 +2021,7 @@ mod tests {
                 kind: "simulated".to_string(),
                 payload: "{\"work\":1}".to_string(),
                 required_capabilities: Vec::new(),
+                priority: JobPriorityProto::Unspecified as i32,
             }))
             .await
             .expect("submit should succeed")
@@ -1974,6 +2091,7 @@ mod tests {
                 kind: "simulated".to_string(),
                 payload: "{\"work\":2}".to_string(),
                 required_capabilities: Vec::new(),
+                priority: JobPriorityProto::Unspecified as i32,
             }))
             .await
             .expect("submit should succeed")
@@ -2040,6 +2158,7 @@ mod tests {
                 kind: "simulated".to_string(),
                 payload: "{\"work\":3}".to_string(),
                 required_capabilities: Vec::new(),
+                priority: JobPriorityProto::Unspecified as i32,
             }))
             .await
             .expect("submit should succeed")
@@ -2134,6 +2253,7 @@ mod tests {
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
                 required_capabilities: Vec::new(),
+                priority: JobPriority::Normal,
                 state: JobState::Leased,
                 lease: Some(JobLease {
                     worker_id: "Worker-A".to_string(),
@@ -2154,6 +2274,7 @@ mod tests {
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
                 required_capabilities: Vec::new(),
+                priority: JobPriority::Normal,
                 state: JobState::Leased,
                 lease: Some(JobLease {
                     worker_id: "Worker-B".to_string(),
@@ -2196,6 +2317,7 @@ mod tests {
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
                 required_capabilities: Vec::new(),
+                priority: JobPriority::Normal,
                 state: JobState::CancelRequested,
                 lease: Some(JobLease {
                     worker_id: "Worker-A".to_string(),

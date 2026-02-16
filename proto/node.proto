@@ -26,6 +26,13 @@ enum JobRunState {
   JOB_RUN_STATE_CANCELLED = 7;
 }
 
+enum JobPriority {
+  JOB_PRIORITY_UNSPECIFIED = 0;
+  JOB_PRIORITY_LOW = 1;
+  JOB_PRIORITY_NORMAL = 2;
+  JOB_PRIORITY_HIGH = 3;
+}
+
 message HeartbeatRequest {
   string node_id = 1;
   float gpu_temp = 2;
@@ -51,6 +58,7 @@ message SubmitJobRequest {
   string kind = 1;
   string payload = 2;
   repeated string required_capabilities = 3;
+  JobPriority priority = 4;
 }
 
 message SubmitJobResponse {
