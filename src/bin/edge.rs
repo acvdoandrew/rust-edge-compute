@@ -17,10 +17,7 @@ enum EdgeCommand {
     /// Run a worker node
     Node(NodeArgs),
     /// Submit and manage jobs
-    Job {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
+    Job(JobArgs),
 }
 
 const DEFAULT_BIND_ADDR: &str = "[::1]:50051";
@@ -53,12 +50,72 @@ struct NodeArgs {
     extra_args: Vec<String>,
 }
 
+#[derive(ClapArgs, Debug)]
+struct JobArgs {
+    #[arg(short = 's', long, default_value = DEFAULT_SERVER_ADDR)]
+    server: String,
+
+    #[command(subcommand)]
+    command: JobCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum JobCommand {
+    /// Submit a job
+    Submit {
+        #[arg(long, default_value = "simulated")]
+        kind: String,
+
+        #[arg(long, default_value = "{}")]
+        payload: String,
+
+        #[arg(long = "require")]
+        required_capabilities: Vec<String>,
+
+        #[arg(long, value_enum, default_value_t = JobPriorityArg::Normal)]
+        priority: JobPriorityArg,
+    },
+    /// Fetch a job status once
+    Status { job_id: String },
+    /// Poll job status until terminal state
+    Watch {
+        job_id: String,
+
+        #[arg(long, default_value_t = 1000)]
+        interval_ms: u64,
+    },
+    /// Request cancellation for a job
+    Cancel {
+        job_id: String,
+
+        #[arg(long, default_value = "")]
+        reason: String,
+    },
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum NodeProfile {
     Auto,
     Sim,
     Nvml,
     AmdSysfs,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum JobPriorityArg {
+    Low,
+    Normal,
+    High,
+}
+
+impl JobPriorityArg {
+    fn as_jobctl_value(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Normal => "normal",
+            Self::High => "high",
+        }
+    }
 }
 
 impl NodeProfile {
@@ -132,7 +189,53 @@ fn forward(command: EdgeCommand) -> (&'static str, Vec<String>) {
 
             ("rust-edge-compute", args)
         }
-        EdgeCommand::Job { args } => ("jobctl", args),
+        EdgeCommand::Job(job) => {
+            let mut args = vec!["--server".to_string(), job.server];
+
+            match job.command {
+                JobCommand::Submit {
+                    kind,
+                    payload,
+                    required_capabilities,
+                    priority,
+                } => {
+                    args.push("submit".to_string());
+                    args.push("--kind".to_string());
+                    args.push(kind);
+                    args.push("--payload".to_string());
+                    args.push(payload);
+
+                    for capability in required_capabilities {
+                        args.push("--require".to_string());
+                        args.push(capability);
+                    }
+
+                    args.push("--priority".to_string());
+                    args.push(priority.as_jobctl_value().to_string());
+                }
+                JobCommand::Status { job_id } => {
+                    args.push("status".to_string());
+                    args.push(job_id);
+                }
+                JobCommand::Watch {
+                    job_id,
+                    interval_ms,
+                } => {
+                    args.push("watch".to_string());
+                    args.push(job_id);
+                    args.push("--interval-ms".to_string());
+                    args.push(interval_ms.to_string());
+                }
+                JobCommand::Cancel { job_id, reason } => {
+                    args.push("cancel".to_string());
+                    args.push(job_id);
+                    args.push("--reason".to_string());
+                    args.push(reason);
+                }
+            }
+
+            ("jobctl", args)
+        }
     }
 }
 
