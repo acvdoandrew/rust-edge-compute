@@ -85,6 +85,45 @@ struct DashboardSnapshot {
     total_heartbeats: u64,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JobState {
+    Queued,
+    Leased,
+    Running,
+    Succeeded,
+    Failed,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct JobLease {
+    worker_id: String,
+    leased_at: Instant,
+    lease_timeout: Duration,
+}
+
+#[allow(dead_code)]
+impl JobLease {
+    fn is_expired(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.leased_at) > self.lease_timeout
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct JobRecord {
+    job_id: String,
+    kind: String,
+    payload: String,
+    state: JobState,
+    lease: Option<JobLease>,
+    output: Option<String>,
+    error: Option<String>,
+    created_at: Instant,
+    updated_at: Instant,
+}
+
 #[derive(Debug)]
 pub struct MyNodeService {
     state: Arc<DashMap<String, NodeStatus>>,
@@ -631,5 +670,18 @@ mod tests {
 
         assert!(removed);
         assert!(state.get("Node-X").is_none());
+    }
+
+    #[test]
+    fn job_lease_expiration_tracks_timeout_boundary() {
+        let start = Instant::now();
+        let lease = JobLease {
+            worker_id: "Worker-1".to_string(),
+            leased_at: start,
+            lease_timeout: Duration::from_secs(10),
+        };
+
+        assert!(!lease.is_expired(start + Duration::from_secs(10)));
+        assert!(lease.is_expired(start + Duration::from_secs(11)));
     }
 }
