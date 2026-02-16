@@ -50,6 +50,7 @@ message DisconnectResponse {
 message SubmitJobRequest {
   string kind = 1;
   string payload = 2;
+  repeated string required_capabilities = 3;
 }
 
 message SubmitJobResponse {
@@ -58,6 +59,7 @@ message SubmitJobResponse {
 
 message LeaseJobRequest {
   string worker_id = 1;
+  repeated string worker_capabilities = 2;
 }
 
 message LeaseJobResponse {

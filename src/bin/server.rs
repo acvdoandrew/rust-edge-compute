@@ -182,6 +182,7 @@ struct JobRecord {
     job_id: String,
     kind: String,
     payload: String,
+    required_capabilities: Vec<String>,
     state: JobState,
     lease: Option<JobLease>,
     output: Option<String>,
@@ -205,6 +206,28 @@ fn retry_delay_for_attempt(attempt: u32) -> Duration {
     let base_secs = JOB_RETRY_BASE_DELAY.as_secs().max(1);
     let delay_secs = base_secs.saturating_mul(multiplier);
     Duration::from_secs(delay_secs.min(JOB_RETRY_CAP_DELAY.as_secs()))
+}
+
+fn normalize_capabilities(values: &[String]) -> Vec<String> {
+    let mut normalized: Vec<String> = values
+        .iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect();
+
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
+fn worker_satisfies_capabilities(worker: &[String], required: &[String]) -> bool {
+    if required.is_empty() {
+        return true;
+    }
+
+    required
+        .iter()
+        .all(|requirement| worker.binary_search(requirement).is_ok())
 }
 
 fn update_node_status(
@@ -625,6 +648,7 @@ impl JobService for MyNodeService {
         }
 
         let now = Instant::now();
+        let required_capabilities = normalize_capabilities(&req.required_capabilities);
         let job_seq = self.job_sequence.fetch_add(1, Ordering::Relaxed) + 1;
         let job_id = format!("job-{job_seq:06}");
 
@@ -634,6 +658,7 @@ impl JobService for MyNodeService {
                 job_id: job_id.clone(),
                 kind: req.kind,
                 payload: req.payload,
+                required_capabilities,
                 state: JobState::Queued,
                 lease: None,
                 output: None,
@@ -659,6 +684,7 @@ impl JobService for MyNodeService {
         }
 
         let now = Instant::now();
+        let worker_capabilities = normalize_capabilities(&req.worker_capabilities);
         let _ = requeue_expired_jobs(&self.jobs, now);
 
         let Some(job_id) = self
@@ -667,6 +693,11 @@ impl JobService for MyNodeService {
             .filter_map(|entry| {
                 let job = entry.value();
                 if job.state != JobState::Queued {
+                    return None;
+                }
+
+                if !worker_satisfies_capabilities(&worker_capabilities, &job.required_capabilities)
+                {
                     return None;
                 }
 
@@ -1135,8 +1166,7 @@ mod tests {
         let client = client.unwrap_or_else(|| {
             panic!(
                 "connect job service client: {}",
-                last_err
-                    .expect("expected connection error when client is unavailable")
+                last_err.expect("expected connection error when client is unavailable")
             )
         });
 
@@ -1283,6 +1313,7 @@ mod tests {
                 job_id: "job-000001".to_string(),
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
+                required_capabilities: Vec::new(),
                 state: JobState::Queued,
                 lease: None,
                 output: None,
@@ -1297,6 +1328,7 @@ mod tests {
                 job_id: "job-000002".to_string(),
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
+                required_capabilities: Vec::new(),
                 state: JobState::Leased,
                 lease: Some(JobLease {
                     worker_id: "Worker-A".to_string(),
@@ -1315,6 +1347,7 @@ mod tests {
                 job_id: "job-000003".to_string(),
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
+                required_capabilities: Vec::new(),
                 state: JobState::Running,
                 lease: Some(JobLease {
                     worker_id: "Worker-B".to_string(),
@@ -1333,6 +1366,7 @@ mod tests {
                 job_id: "job-000004".to_string(),
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
+                required_capabilities: Vec::new(),
                 state: JobState::Succeeded,
                 lease: None,
                 output: Some("ok".to_string()),
@@ -1347,6 +1381,7 @@ mod tests {
                 job_id: "job-000005".to_string(),
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
+                required_capabilities: Vec::new(),
                 state: JobState::Failed,
                 lease: None,
                 output: None,
@@ -1436,6 +1471,7 @@ mod tests {
             .submit_job(Request::new(SubmitJobRequest {
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
+                required_capabilities: Vec::new(),
             }))
             .await
             .expect("submit job should succeed")
@@ -1464,6 +1500,7 @@ mod tests {
             .submit_job(Request::new(SubmitJobRequest {
                 kind: "simulated".to_string(),
                 payload: "payload-1".to_string(),
+                required_capabilities: Vec::new(),
             }))
             .await
             .expect("first job submit should succeed")
@@ -1473,6 +1510,7 @@ mod tests {
             .submit_job(Request::new(SubmitJobRequest {
                 kind: "simulated".to_string(),
                 payload: "payload-2".to_string(),
+                required_capabilities: Vec::new(),
             }))
             .await
             .expect("second job submit should succeed");
@@ -1480,6 +1518,7 @@ mod tests {
         let lease = service
             .lease_job(Request::new(LeaseJobRequest {
                 worker_id: "Worker-A".to_string(),
+                worker_capabilities: Vec::new(),
             }))
             .await
             .expect("lease should succeed")
@@ -1512,6 +1551,7 @@ mod tests {
         let lease = service
             .lease_job(Request::new(LeaseJobRequest {
                 worker_id: "Worker-A".to_string(),
+                worker_capabilities: Vec::new(),
             }))
             .await
             .expect("lease call should succeed")
@@ -1523,6 +1563,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lease_job_respects_required_capabilities() {
+        let service = test_service();
+
+        let constrained_job = service
+            .submit_job(Request::new(SubmitJobRequest {
+                kind: "simulated".to_string(),
+                payload: "{}".to_string(),
+                required_capabilities: vec!["GPU:NVML".to_string(), "region:us".to_string()],
+            }))
+            .await
+            .expect("submit should succeed")
+            .into_inner();
+
+        let missing_caps = service
+            .lease_job(Request::new(LeaseJobRequest {
+                worker_id: "Worker-A".to_string(),
+                worker_capabilities: vec!["gpu:amd".to_string(), "region:us".to_string()],
+            }))
+            .await
+            .expect("lease call should succeed")
+            .into_inner();
+
+        assert!(!missing_caps.has_job);
+
+        let matched_caps = service
+            .lease_job(Request::new(LeaseJobRequest {
+                worker_id: "Worker-B".to_string(),
+                worker_capabilities: vec![
+                    "region:us".to_string(),
+                    "gpu:nvml".to_string(),
+                    "extra:label".to_string(),
+                ],
+            }))
+            .await
+            .expect("lease call should succeed")
+            .into_inner();
+
+        assert!(matched_caps.has_job);
+        assert_eq!(matched_caps.job_id, constrained_job.job_id);
+    }
+
+    #[tokio::test]
     async fn report_job_result_moves_leased_job_to_terminal_state() {
         let service = test_service();
 
@@ -1530,6 +1612,7 @@ mod tests {
             .submit_job(Request::new(SubmitJobRequest {
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
+                required_capabilities: Vec::new(),
             }))
             .await
             .expect("submit should succeed")
@@ -1538,6 +1621,7 @@ mod tests {
         service
             .lease_job(Request::new(LeaseJobRequest {
                 worker_id: "Worker-A".to_string(),
+                worker_capabilities: Vec::new(),
             }))
             .await
             .expect("lease should succeed");
@@ -1576,6 +1660,7 @@ mod tests {
             .submit_job(Request::new(SubmitJobRequest {
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
+                required_capabilities: Vec::new(),
             }))
             .await
             .expect("submit should succeed")
@@ -1584,6 +1669,7 @@ mod tests {
         service
             .lease_job(Request::new(LeaseJobRequest {
                 worker_id: "Worker-A".to_string(),
+                worker_capabilities: Vec::new(),
             }))
             .await
             .expect("lease should succeed");
@@ -1610,6 +1696,7 @@ mod tests {
             .submit_job(Request::new(SubmitJobRequest {
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
+                required_capabilities: Vec::new(),
             }))
             .await
             .expect("submit should succeed")
@@ -1618,6 +1705,7 @@ mod tests {
         service
             .lease_job(Request::new(LeaseJobRequest {
                 worker_id: "Worker-A".to_string(),
+                worker_capabilities: Vec::new(),
             }))
             .await
             .expect("lease should succeed");
@@ -1653,6 +1741,7 @@ mod tests {
             .submit_job(Request::new(SubmitJobRequest {
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
+                required_capabilities: Vec::new(),
             }))
             .await
             .expect("submit should succeed")
@@ -1689,6 +1778,7 @@ mod tests {
             .submit_job(Request::new(SubmitJobRequest {
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
+                required_capabilities: Vec::new(),
             }))
             .await
             .expect("submit should succeed")
@@ -1697,6 +1787,7 @@ mod tests {
         service
             .lease_job(Request::new(LeaseJobRequest {
                 worker_id: "Worker-A".to_string(),
+                worker_capabilities: Vec::new(),
             }))
             .await
             .expect("lease should succeed");
@@ -1752,6 +1843,7 @@ mod tests {
             .submit_job(Request::new(SubmitJobRequest {
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
+                required_capabilities: Vec::new(),
             }))
             .await
             .expect("submit should succeed")
@@ -1761,6 +1853,7 @@ mod tests {
             let lease = service
                 .lease_job(Request::new(LeaseJobRequest {
                     worker_id: format!("Worker-{attempt}"),
+                    worker_capabilities: Vec::new(),
                 }))
                 .await
                 .expect("lease should succeed")
@@ -1811,6 +1904,7 @@ mod tests {
             .submit_job(Request::new(SubmitJobRequest {
                 kind: "simulated".to_string(),
                 payload: "{\"work\":1}".to_string(),
+                required_capabilities: Vec::new(),
             }))
             .await
             .expect("submit should succeed")
@@ -1819,6 +1913,7 @@ mod tests {
         let leased = client
             .lease_job(Request::new(LeaseJobRequest {
                 worker_id: "Worker-IT-A".to_string(),
+                worker_capabilities: Vec::new(),
             }))
             .await
             .expect("lease should succeed")
@@ -1878,6 +1973,7 @@ mod tests {
             .submit_job(Request::new(SubmitJobRequest {
                 kind: "simulated".to_string(),
                 payload: "{\"work\":2}".to_string(),
+                required_capabilities: Vec::new(),
             }))
             .await
             .expect("submit should succeed")
@@ -1886,6 +1982,7 @@ mod tests {
         let first_lease = client
             .lease_job(Request::new(LeaseJobRequest {
                 worker_id: "Worker-IT-A".to_string(),
+                worker_capabilities: Vec::new(),
             }))
             .await
             .expect("first lease should succeed")
@@ -1909,6 +2006,7 @@ mod tests {
         let second_lease = client
             .lease_job(Request::new(LeaseJobRequest {
                 worker_id: "Worker-IT-B".to_string(),
+                worker_capabilities: Vec::new(),
             }))
             .await
             .expect("second lease should succeed")
@@ -1941,6 +2039,7 @@ mod tests {
             .submit_job(Request::new(SubmitJobRequest {
                 kind: "simulated".to_string(),
                 payload: "{\"work\":3}".to_string(),
+                required_capabilities: Vec::new(),
             }))
             .await
             .expect("submit should succeed")
@@ -1949,6 +2048,7 @@ mod tests {
         client
             .lease_job(Request::new(LeaseJobRequest {
                 worker_id: "Worker-IT-A".to_string(),
+                worker_capabilities: Vec::new(),
             }))
             .await
             .expect("lease should succeed");
@@ -1979,6 +2079,7 @@ mod tests {
         let lease_after_timeout = client
             .lease_job(Request::new(LeaseJobRequest {
                 worker_id: "Worker-IT-B".to_string(),
+                worker_capabilities: Vec::new(),
             }))
             .await
             .expect("lease call should succeed")
@@ -2032,6 +2133,7 @@ mod tests {
                 job_id: "job-000001".to_string(),
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
+                required_capabilities: Vec::new(),
                 state: JobState::Leased,
                 lease: Some(JobLease {
                     worker_id: "Worker-A".to_string(),
@@ -2051,6 +2153,7 @@ mod tests {
                 job_id: "job-000002".to_string(),
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
+                required_capabilities: Vec::new(),
                 state: JobState::Leased,
                 lease: Some(JobLease {
                     worker_id: "Worker-B".to_string(),
@@ -2092,6 +2195,7 @@ mod tests {
                 job_id: "job-000010".to_string(),
                 kind: "simulated".to_string(),
                 payload: "{}".to_string(),
+                required_capabilities: Vec::new(),
                 state: JobState::CancelRequested,
                 lease: Some(JobLease {
                     worker_id: "Worker-A".to_string(),

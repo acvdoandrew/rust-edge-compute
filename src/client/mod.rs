@@ -181,6 +181,7 @@ pub async fn start_client(
                     if let Some(client) = job_client.as_mut() {
                         let lease_request = tonic::Request::new(LeaseJobRequest {
                             worker_id: node_id.clone(),
+                            worker_capabilities: Vec::new(),
                         });
                         match client.lease_job(lease_request).await {
                             Ok(response) => {
