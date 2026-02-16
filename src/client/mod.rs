@@ -12,8 +12,9 @@ pub mod node {
     tonic::include_proto!("node");
 }
 
+use node::job_service_client::JobServiceClient;
 use node::node_service_client::NodeServiceClient;
-use node::{DisconnectRequest, HeartbeatRequest};
+use node::{DisconnectRequest, HeartbeatRequest, LeaseJobRequest};
 
 pub async fn start_client(
     state: Arc<Mutex<Option<GpuStats>>>,
@@ -58,12 +59,13 @@ pub async fn start_client(
         };
 
         match connect_result {
-            Some(Ok(mut client)) => {
+            Some(Ok(mut node_client)) => {
                 reconnect_backoff.reset();
+                let mut job_client = JobServiceClient::connect(server_addr.clone()).await.ok();
 
                 loop {
                     if *shutdown_rx.borrow() {
-                        let _ = client
+                        let _ = node_client
                             .disconnect(tonic::Request::new(DisconnectRequest {
                                 node_id: node_id.clone(),
                             }))
@@ -88,16 +90,37 @@ pub async fn start_client(
                         client_version: client_version.clone(),
                     });
 
-                    if client.heartbeat(request).await.is_err() {
+                    if node_client.heartbeat(request).await.is_err() {
                         should_backoff = true;
                         break;
+                    }
+
+                    if let Some(client) = job_client.as_mut() {
+                        let lease_request = tonic::Request::new(LeaseJobRequest {
+                            worker_id: node_id.clone(),
+                        });
+                        match client.lease_job(lease_request).await {
+                            Ok(response) => {
+                                let lease = response.into_inner();
+                                if lease.has_job {
+                                    eprintln!(
+                                        "leased job {} (kind={})",
+                                        lease.job_id,
+                                        lease.kind
+                                    );
+                                }
+                            }
+                            Err(_) => {
+                                job_client = None;
+                            }
+                        }
                     }
 
                     tokio::select! {
                         _ = sleep(Duration::from_secs(2)) => {}
                         changed = shutdown_rx.changed() => {
                             if changed.is_err() || *shutdown_rx.borrow() {
-                                let _ = client
+                                let _ = node_client
                                     .disconnect(tonic::Request::new(DisconnectRequest {
                                         node_id: node_id.clone(),
                                     }))
