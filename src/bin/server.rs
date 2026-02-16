@@ -579,28 +579,32 @@ fn render_dashboard(frame: &mut ratatui::Frame, snapshot: &DashboardSnapshot) {
     );
     frame.render_widget(table, chunks[1]);
 
-    let jobs_text = if snapshot.recent_jobs.is_empty() {
-        "No jobs submitted yet".to_string()
+    if snapshot.recent_jobs.is_empty() {
+        let jobs_panel = Paragraph::new("No jobs submitted yet")
+            .block(Block::default().title(" Jobs ").borders(Borders::ALL));
+        frame.render_widget(jobs_panel, chunks[2]);
     } else {
-        snapshot
-            .recent_jobs
-            .iter()
-            .take(3)
-            .map(|job| {
-                format!(
-                    "{}  [{} | {}]",
-                    job.job_id,
-                    job.state.as_str(),
-                    job.priority.as_str()
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
+        let job_rows = snapshot.recent_jobs.iter().take(5).map(|job| {
+            Row::new(vec![
+                Cell::from(job.job_id.clone()),
+                Cell::from(job.state.as_str()),
+                Cell::from(job.priority.as_str()),
+            ])
+        });
 
-    let jobs_panel =
-        Paragraph::new(jobs_text).block(Block::default().title(" Jobs ").borders(Borders::ALL));
-    frame.render_widget(jobs_panel, chunks[2]);
+        let jobs_table = Table::new(
+            job_rows,
+            [
+                Constraint::Length(12),
+                Constraint::Length(18),
+                Constraint::Length(10),
+            ],
+        )
+        .header(Row::new(["Job ID", "State", "Priority"]))
+        .block(Block::default().title(" Jobs ").borders(Borders::ALL));
+
+        frame.render_widget(jobs_table, chunks[2]);
+    }
 
     let footer = Paragraph::new("Press q or Ctrl+C to stop the orchestrator")
         .block(Block::default().title(" Controls ").borders(Borders::ALL));
