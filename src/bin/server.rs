@@ -1408,6 +1408,68 @@ mod tests {
         stop_job_service_server(shutdown_tx, server_task).await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn grpc_requeues_timed_out_lease_for_new_worker() {
+        let service = test_service();
+        let (mut client, shutdown_tx, server_task) = spawn_job_service_server(service.clone()).await;
+
+        let submit = client
+            .submit_job(Request::new(SubmitJobRequest {
+                kind: "simulated".to_string(),
+                payload: "{\"work\":2}".to_string(),
+            }))
+            .await
+            .expect("submit should succeed")
+            .into_inner();
+
+        let first_lease = client
+            .lease_job(Request::new(LeaseJobRequest {
+                worker_id: "Worker-IT-A".to_string(),
+            }))
+            .await
+            .expect("first lease should succeed")
+            .into_inner();
+
+        assert!(first_lease.has_job);
+        assert_eq!(first_lease.job_id, submit.job_id);
+
+        {
+            let mut record = service
+                .jobs
+                .get_mut(&submit.job_id)
+                .expect("leased job should exist");
+            let lease = record
+                .lease
+                .as_mut()
+                .expect("leased job should include lease metadata");
+            lease.leased_at = Instant::now() - Duration::from_secs(30);
+        }
+
+        let second_lease = client
+            .lease_job(Request::new(LeaseJobRequest {
+                worker_id: "Worker-IT-B".to_string(),
+            }))
+            .await
+            .expect("second lease should succeed")
+            .into_inner();
+
+        assert!(second_lease.has_job);
+        assert_eq!(second_lease.job_id, submit.job_id);
+
+        let status = client
+            .get_job_status(Request::new(GetJobStatusRequest {
+                job_id: submit.job_id,
+            }))
+            .await
+            .expect("status should succeed")
+            .into_inner();
+
+        assert_eq!(status.state, JobRunState::Leased as i32);
+        assert_eq!(status.assigned_worker_id, "Worker-IT-B");
+
+        stop_job_service_server(shutdown_tx, server_task).await;
+    }
+
     #[test]
     fn job_lease_expiration_tracks_timeout_boundary() {
         let start = Instant::now();
