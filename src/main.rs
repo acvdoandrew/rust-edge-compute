@@ -314,6 +314,19 @@ mod tests {
     }
 
     #[test]
+    fn init_source_uses_explicit_amd_backend() {
+        let (source, status) = init_telemetry_source_with_factories(
+            TelemetryBackendArg::AmdSysfs,
+            || panic!("nvml factory should not be called for explicit amd backend"),
+            || Ok(fixed_source("amd-sysfs")),
+        )
+        .expect("explicit amd backend should initialize when amd source is available");
+
+        assert_eq!(status, "amd-sysfs");
+        assert_eq!(source.backend_name(), "amd-sysfs");
+    }
+
+    #[test]
     fn init_source_auto_falls_back_to_sim_when_nvml_unavailable() {
         let (source, status) = init_telemetry_source_with_factories(
             TelemetryBackendArg::Auto,
