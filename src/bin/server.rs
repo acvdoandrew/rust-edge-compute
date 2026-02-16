@@ -31,6 +31,7 @@ use node::{
 const DEFAULT_BIND_ADDR: &str = "[::1]:50051";
 const STALE_AFTER: Duration = Duration::from_secs(10);
 const EVICT_AFTER: Duration = Duration::from_secs(60);
+const JOB_LEASE_TIMEOUT: Duration = Duration::from_secs(15);
 const FRAME_POLL: Duration = Duration::from_millis(100);
 
 #[derive(Parser, Debug)]
@@ -476,11 +477,67 @@ impl JobService for MyNodeService {
 
     async fn lease_job(
         &self,
-        _request: Request<LeaseJobRequest>,
+        request: Request<LeaseJobRequest>,
     ) -> Result<Response<LeaseJobResponse>, Status> {
-        Err(Status::unimplemented(
-            "job leasing is not implemented yet in this sprint step",
-        ))
+        let req = request.into_inner();
+
+        if req.worker_id.trim().is_empty() {
+            return Err(Status::invalid_argument("worker_id cannot be empty"));
+        }
+
+        let Some(job_id) = self
+            .jobs
+            .iter()
+            .filter_map(|entry| {
+                let job = entry.value();
+                if job.state == JobState::Queued {
+                    Some(job.job_id.clone())
+                } else {
+                    None
+                }
+            })
+            .min()
+        else {
+            return Ok(Response::new(LeaseJobResponse {
+                has_job: false,
+                job_id: String::new(),
+                kind: String::new(),
+                payload: String::new(),
+                lease_timeout_seconds: JOB_LEASE_TIMEOUT.as_secs(),
+            }));
+        };
+
+        let now = Instant::now();
+        let mut job = self
+            .jobs
+            .get_mut(&job_id)
+            .ok_or_else(|| Status::internal("selected job disappeared before leasing"))?;
+
+        if job.state != JobState::Queued {
+            return Ok(Response::new(LeaseJobResponse {
+                has_job: false,
+                job_id: String::new(),
+                kind: String::new(),
+                payload: String::new(),
+                lease_timeout_seconds: JOB_LEASE_TIMEOUT.as_secs(),
+            }));
+        }
+
+        job.state = JobState::Leased;
+        job.updated_at = now;
+        job.lease = Some(JobLease {
+            worker_id: req.worker_id,
+            leased_at: now,
+            lease_timeout: JOB_LEASE_TIMEOUT,
+        });
+
+        Ok(Response::new(LeaseJobResponse {
+            has_job: true,
+            job_id: job.job_id.clone(),
+            kind: job.kind.clone(),
+            payload: job.payload.clone(),
+            lease_timeout_seconds: JOB_LEASE_TIMEOUT.as_secs(),
+        }))
     }
 
     async fn report_job_result(
@@ -815,6 +872,72 @@ mod tests {
         assert!(status_response.assigned_worker_id.is_empty());
         assert!(status_response.output.is_empty());
         assert!(status_response.error.is_empty());
+    }
+
+    #[tokio::test]
+    async fn lease_job_assigns_oldest_queued_job_to_worker() {
+        let service = test_service();
+
+        let first_job = service
+            .submit_job(Request::new(SubmitJobRequest {
+                kind: "simulated".to_string(),
+                payload: "payload-1".to_string(),
+            }))
+            .await
+            .expect("first job submit should succeed")
+            .into_inner();
+
+        service
+            .submit_job(Request::new(SubmitJobRequest {
+                kind: "simulated".to_string(),
+                payload: "payload-2".to_string(),
+            }))
+            .await
+            .expect("second job submit should succeed");
+
+        let lease = service
+            .lease_job(Request::new(LeaseJobRequest {
+                worker_id: "Worker-A".to_string(),
+            }))
+            .await
+            .expect("lease should succeed")
+            .into_inner();
+
+        assert!(lease.has_job);
+        assert_eq!(lease.job_id, first_job.job_id);
+        assert_eq!(lease.kind, "simulated");
+        assert_eq!(lease.payload, "payload-1");
+
+        let leased_record = service
+            .jobs
+            .get(&lease.job_id)
+            .expect("leased job should be present in job map");
+        assert_eq!(leased_record.state, JobState::Leased);
+        assert_eq!(
+            leased_record
+                .lease
+                .as_ref()
+                .expect("lease metadata should be set")
+                .worker_id,
+            "Worker-A"
+        );
+    }
+
+    #[tokio::test]
+    async fn lease_job_returns_empty_response_when_queue_is_empty() {
+        let service = test_service();
+
+        let lease = service
+            .lease_job(Request::new(LeaseJobRequest {
+                worker_id: "Worker-A".to_string(),
+            }))
+            .await
+            .expect("lease call should succeed")
+            .into_inner();
+
+        assert!(!lease.has_job);
+        assert!(lease.job_id.is_empty());
+        assert!(lease.kind.is_empty());
     }
 
     #[test]
