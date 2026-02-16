@@ -9,6 +9,8 @@ service NodeService {
 service JobService {
   rpc SubmitJob (SubmitJobRequest) returns (SubmitJobResponse);
   rpc LeaseJob (LeaseJobRequest) returns (LeaseJobResponse);
+  rpc ExtendJobLease (ExtendJobLeaseRequest) returns (ExtendJobLeaseResponse);
+  rpc CancelJob (CancelJobRequest) returns (CancelJobResponse);
   rpc ReportJobResult (ReportJobResultRequest) returns (ReportJobResultResponse);
   rpc GetJobStatus (GetJobStatusRequest) returns (GetJobStatusResponse);
 }
@@ -20,6 +22,8 @@ enum JobRunState {
   JOB_RUN_STATE_RUNNING = 3;
   JOB_RUN_STATE_SUCCEEDED = 4;
   JOB_RUN_STATE_FAILED = 5;
+  JOB_RUN_STATE_CANCEL_REQUESTED = 6;
+  JOB_RUN_STATE_CANCELLED = 7;
 }
 
 message HeartbeatRequest {
@@ -62,6 +66,27 @@ message LeaseJobResponse {
   string kind = 3;
   string payload = 4;
   uint64 lease_timeout_seconds = 5;
+}
+
+message ExtendJobLeaseRequest {
+  string worker_id = 1;
+  string job_id = 2;
+}
+
+message ExtendJobLeaseResponse {
+  bool acknowledged = 1;
+  uint64 lease_timeout_seconds = 2;
+  bool cancel_requested = 3;
+}
+
+message CancelJobRequest {
+  string job_id = 1;
+  string reason = 2;
+}
+
+message CancelJobResponse {
+  bool acknowledged = 1;
+  JobRunState state = 2;
 }
 
 message ReportJobResultRequest {

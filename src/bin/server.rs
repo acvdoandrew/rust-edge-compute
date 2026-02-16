@@ -23,7 +23,8 @@ pub mod node {
 use node::job_service_server::{JobService, JobServiceServer};
 use node::node_service_server::{NodeService, NodeServiceServer};
 use node::{
-    DisconnectRequest, DisconnectResponse, GetJobStatusRequest, GetJobStatusResponse,
+    CancelJobRequest, CancelJobResponse, DisconnectRequest, DisconnectResponse,
+    ExtendJobLeaseRequest, ExtendJobLeaseResponse, GetJobStatusRequest, GetJobStatusResponse,
     HeartbeatRequest, HeartbeatResponse, JobRunState, LeaseJobRequest, LeaseJobResponse,
     ReportJobResultRequest, ReportJobResultResponse, SubmitJobRequest, SubmitJobResponse,
 };
@@ -32,6 +33,9 @@ const DEFAULT_BIND_ADDR: &str = "[::1]:50051";
 const STALE_AFTER: Duration = Duration::from_secs(10);
 const EVICT_AFTER: Duration = Duration::from_secs(60);
 const JOB_LEASE_TIMEOUT: Duration = Duration::from_secs(15);
+const JOB_MAX_ATTEMPTS: u32 = 3;
+const JOB_RETRY_BASE_DELAY: Duration = Duration::from_secs(2);
+const JOB_RETRY_CAP_DELAY: Duration = Duration::from_secs(30);
 const FRAME_POLL: Duration = Duration::from_millis(100);
 
 #[derive(Parser, Debug)]
@@ -108,6 +112,8 @@ enum JobState {
     Queued,
     Leased,
     Running,
+    CancelRequested,
+    Cancelled,
     Succeeded,
     Failed,
 }
@@ -118,6 +124,8 @@ impl JobState {
             Self::Queued => "Queued",
             Self::Leased => "Leased",
             Self::Running => "Running",
+            Self::CancelRequested => "Cancel Requested",
+            Self::Cancelled => "Cancelled",
             Self::Succeeded => "Succeeded",
             Self::Failed => "Failed",
         }
@@ -128,8 +136,27 @@ impl JobState {
             Self::Queued => JobRunState::Queued,
             Self::Leased => JobRunState::Leased,
             Self::Running => JobRunState::Running,
+            Self::CancelRequested => JobRunState::CancelRequested,
+            Self::Cancelled => JobRunState::Cancelled,
             Self::Succeeded => JobRunState::Succeeded,
             Self::Failed => JobRunState::Failed,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct JobRetryState {
+    attempt: u32,
+    max_attempts: u32,
+    next_eligible_at: Instant,
+}
+
+impl JobRetryState {
+    fn new(now: Instant) -> Self {
+        Self {
+            attempt: 0,
+            max_attempts: JOB_MAX_ATTEMPTS,
+            next_eligible_at: now,
         }
     }
 }
@@ -168,7 +195,16 @@ pub struct MyNodeService {
     state: Arc<DashMap<String, NodeStatus>>,
     total_heartbeats: Arc<AtomicU64>,
     jobs: Arc<DashMap<String, JobRecord>>,
+    job_retries: Arc<DashMap<String, JobRetryState>>,
     job_sequence: Arc<AtomicU64>,
+}
+
+fn retry_delay_for_attempt(attempt: u32) -> Duration {
+    let shift = attempt.saturating_sub(1).min(31);
+    let multiplier = 1u64 << shift;
+    let base_secs = JOB_RETRY_BASE_DELAY.as_secs().max(1);
+    let delay_secs = base_secs.saturating_mul(multiplier);
+    Duration::from_secs(delay_secs.min(JOB_RETRY_CAP_DELAY.as_secs()))
 }
 
 fn update_node_status(
@@ -245,7 +281,10 @@ fn requeue_expired_jobs(jobs: &DashMap<String, JobRecord>, now: Instant) -> usiz
         .iter()
         .filter_map(|entry| {
             let job = entry.value();
-            let is_leased_state = matches!(job.state, JobState::Leased | JobState::Running);
+            let is_leased_state = matches!(
+                job.state,
+                JobState::Leased | JobState::Running | JobState::CancelRequested
+            );
             let is_expired = job
                 .lease
                 .as_ref()
@@ -269,11 +308,21 @@ fn requeue_expired_jobs(jobs: &DashMap<String, JobRecord>, now: Instant) -> usiz
                 .map(|lease| lease.is_expired(now))
                 .unwrap_or(false);
 
-            if expired && matches!(job.state, JobState::Leased | JobState::Running) {
-                job.state = JobState::Queued;
-                job.lease = None;
-                job.updated_at = now;
-                requeued += 1;
+            if expired {
+                match job.state {
+                    JobState::Leased | JobState::Running => {
+                        job.state = JobState::Queued;
+                        job.lease = None;
+                        job.updated_at = now;
+                        requeued += 1;
+                    }
+                    JobState::CancelRequested => {
+                        job.state = JobState::Cancelled;
+                        job.lease = None;
+                        job.updated_at = now;
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -329,6 +378,8 @@ fn build_dashboard_snapshot(
             JobState::Queued => queued_jobs += 1,
             JobState::Leased => leased_jobs += 1,
             JobState::Running => running_jobs += 1,
+            JobState::CancelRequested => running_jobs += 1,
+            JobState::Cancelled => failed_jobs += 1,
             JobState::Succeeded => succeeded_jobs += 1,
             JobState::Failed => failed_jobs += 1,
         }
@@ -461,8 +512,8 @@ fn render_dashboard(frame: &mut ratatui::Frame, snapshot: &DashboardSnapshot) {
             .join("\n")
     };
 
-    let jobs_panel = Paragraph::new(jobs_text)
-        .block(Block::default().title(" Jobs ").borders(Borders::ALL));
+    let jobs_panel =
+        Paragraph::new(jobs_text).block(Block::default().title(" Jobs ").borders(Borders::ALL));
     frame.render_widget(jobs_panel, chunks[2]);
 
     let footer = Paragraph::new("Press q or Ctrl+C to stop the orchestrator")
@@ -591,6 +642,8 @@ impl JobService for MyNodeService {
                 updated_at: now,
             },
         );
+        self.job_retries
+            .insert(job_id.clone(), JobRetryState::new(now));
 
         Ok(Response::new(SubmitJobResponse { job_id }))
     }
@@ -613,7 +666,17 @@ impl JobService for MyNodeService {
             .iter()
             .filter_map(|entry| {
                 let job = entry.value();
-                if job.state == JobState::Queued {
+                if job.state != JobState::Queued {
+                    return None;
+                }
+
+                let is_eligible = self
+                    .job_retries
+                    .get(&job.job_id)
+                    .map(|retry| now >= retry.next_eligible_at)
+                    .unwrap_or(true);
+
+                if is_eligible {
                     Some(job.job_id.clone())
                 } else {
                     None
@@ -653,6 +716,13 @@ impl JobService for MyNodeService {
             lease_timeout: JOB_LEASE_TIMEOUT,
         });
 
+        let mut retry = self
+            .job_retries
+            .entry(job.job_id.clone())
+            .or_insert_with(|| JobRetryState::new(now));
+        retry.attempt = retry.attempt.saturating_add(1);
+        retry.next_eligible_at = now;
+
         Ok(Response::new(LeaseJobResponse {
             has_job: true,
             job_id: job.job_id.clone(),
@@ -662,11 +732,122 @@ impl JobService for MyNodeService {
         }))
     }
 
+    async fn extend_job_lease(
+        &self,
+        request: Request<ExtendJobLeaseRequest>,
+    ) -> Result<Response<ExtendJobLeaseResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.worker_id.trim().is_empty() {
+            return Err(Status::invalid_argument("worker_id cannot be empty"));
+        }
+        if req.job_id.trim().is_empty() {
+            return Err(Status::invalid_argument("job_id cannot be empty"));
+        }
+
+        let now = Instant::now();
+        let mut job = self
+            .jobs
+            .get_mut(&req.job_id)
+            .ok_or_else(|| Status::not_found(format!("job {} not found", req.job_id)))?;
+
+        if !matches!(
+            job.state,
+            JobState::Leased | JobState::Running | JobState::CancelRequested
+        ) {
+            return Err(Status::failed_precondition(
+                "job is not currently leased by any worker",
+            ));
+        }
+
+        {
+            let lease = job
+                .lease
+                .as_mut()
+                .ok_or_else(|| Status::failed_precondition("job lease metadata is missing"))?;
+
+            if lease.worker_id != req.worker_id {
+                return Err(Status::permission_denied(
+                    "worker does not own the current lease for this job",
+                ));
+            }
+
+            if lease.is_expired(now) {
+                return Err(Status::failed_precondition("job lease is already expired"));
+            }
+
+            lease.leased_at = now;
+            lease.lease_timeout = JOB_LEASE_TIMEOUT;
+        }
+
+        if job.state == JobState::Leased {
+            job.state = JobState::Running;
+        }
+
+        job.updated_at = now;
+
+        Ok(Response::new(ExtendJobLeaseResponse {
+            acknowledged: true,
+            lease_timeout_seconds: JOB_LEASE_TIMEOUT.as_secs(),
+            cancel_requested: job.state == JobState::CancelRequested,
+        }))
+    }
+
+    async fn cancel_job(
+        &self,
+        request: Request<CancelJobRequest>,
+    ) -> Result<Response<CancelJobResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.job_id.trim().is_empty() {
+            return Err(Status::invalid_argument("job_id cannot be empty"));
+        }
+
+        let now = Instant::now();
+        let mut job = self
+            .jobs
+            .get_mut(&req.job_id)
+            .ok_or_else(|| Status::not_found(format!("job {} not found", req.job_id)))?;
+
+        let reason = if req.reason.trim().is_empty() {
+            None
+        } else {
+            Some(req.reason.trim().to_string())
+        };
+
+        match job.state {
+            JobState::Queued => {
+                job.state = JobState::Cancelled;
+                job.lease = None;
+                job.updated_at = now;
+                job.error = reason
+                    .map(|r| format!("cancelled before execution: {r}"))
+                    .or_else(|| Some("cancelled before execution".to_string()));
+            }
+            JobState::Leased | JobState::Running | JobState::CancelRequested => {
+                job.state = JobState::CancelRequested;
+                job.updated_at = now;
+                if let Some(r) = reason {
+                    job.error = Some(format!("cancel requested: {r}"));
+                } else if job.error.is_none() {
+                    job.error = Some("cancel requested".to_string());
+                }
+            }
+            JobState::Succeeded | JobState::Failed | JobState::Cancelled => {}
+        }
+
+        Ok(Response::new(CancelJobResponse {
+            acknowledged: true,
+            state: job.state.as_proto() as i32,
+        }))
+    }
+
     async fn report_job_result(
         &self,
         request: Request<ReportJobResultRequest>,
     ) -> Result<Response<ReportJobResultResponse>, Status> {
         let req = request.into_inner();
+        let now = Instant::now();
 
         if req.worker_id.trim().is_empty() {
             return Err(Status::invalid_argument("worker_id cannot be empty"));
@@ -691,35 +872,92 @@ impl JobService for MyNodeService {
             ));
         }
 
-        if matches!(job.state, JobState::Succeeded | JobState::Failed) {
+        if matches!(
+            job.state,
+            JobState::Succeeded | JobState::Failed | JobState::Cancelled
+        ) {
             return Err(Status::failed_precondition(
                 "job is already in a terminal state",
             ));
         }
 
-        if matches!(job.state, JobState::Leased) {
+        if job.state == JobState::Leased {
             job.state = JobState::Running;
         }
 
-        job.state = if req.success {
-            JobState::Succeeded
-        } else {
-            JobState::Failed
-        };
-        job.output = if req.output.trim().is_empty() {
+        let output = if req.output.trim().is_empty() {
             None
         } else {
-            Some(req.output)
+            Some(req.output.clone())
         };
-        job.error = if req.error.trim().is_empty() {
+
+        let mut error = if req.error.trim().is_empty() {
             None
         } else {
-            Some(req.error)
+            Some(req.error.clone())
         };
-        job.updated_at = Instant::now();
+
+        if job.state == JobState::CancelRequested {
+            job.state = JobState::Cancelled;
+            job.output = None;
+            job.error = error
+                .take()
+                .or_else(|| Some("job cancelled by operator".to_string()));
+            job.updated_at = now;
+            job.lease = None;
+            return Ok(Response::new(ReportJobResultResponse {
+                acknowledged: true,
+            }));
+        }
+
+        if req.success {
+            job.state = JobState::Succeeded;
+            job.output = output;
+            job.error = error;
+            job.updated_at = now;
+            job.lease = None;
+            return Ok(Response::new(ReportJobResultResponse {
+                acknowledged: true,
+            }));
+        }
+
+        let mut retry_state = self
+            .job_retries
+            .entry(job.job_id.clone())
+            .or_insert_with(|| JobRetryState::new(now));
+
+        let should_retry = retry_state.attempt < retry_state.max_attempts;
+        if should_retry {
+            let delay = retry_delay_for_attempt(retry_state.attempt);
+            retry_state.next_eligible_at = now + delay;
+            job.state = JobState::Queued;
+
+            let message = error
+                .take()
+                .unwrap_or_else(|| "worker reported failure".to_string());
+            job.error = Some(format!(
+                "{message}; retrying ({}/{}) in {}s",
+                retry_state.attempt,
+                retry_state.max_attempts,
+                delay.as_secs()
+            ));
+        } else {
+            retry_state.next_eligible_at = now;
+            job.state = JobState::Failed;
+            job.error = Some(
+                error
+                    .take()
+                    .unwrap_or_else(|| "worker reported failure".to_string()),
+            );
+        }
+
+        job.output = output;
+        job.updated_at = now;
         job.lease = None;
 
-        Ok(Response::new(ReportJobResultResponse { acknowledged: true }))
+        Ok(Response::new(ReportJobResultResponse {
+            acknowledged: true,
+        }))
     }
 
     async fn get_job_status(
@@ -763,12 +1001,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let state = Arc::new(DashMap::new());
     let total_heartbeats = Arc::new(AtomicU64::new(0));
     let jobs = Arc::new(DashMap::new());
+    let job_retries = Arc::new(DashMap::new());
     let job_sequence = Arc::new(AtomicU64::new(0));
 
     let service = MyNodeService {
         state: state.clone(),
         total_heartbeats: total_heartbeats.clone(),
         jobs: jobs.clone(),
+        job_retries: job_retries.clone(),
         job_sequence: job_sequence.clone(),
     };
 
@@ -823,7 +1063,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 mod tests {
     use super::*;
     use tokio::sync::oneshot;
-    use tokio::time::timeout;
+    use tokio::time::{sleep, timeout};
     use tonic::transport::Server;
 
     fn test_service() -> MyNodeService {
@@ -831,6 +1071,7 @@ mod tests {
             state: Arc::new(DashMap::new()),
             total_heartbeats: Arc::new(AtomicU64::new(0)),
             jobs: Arc::new(DashMap::new()),
+            job_retries: Arc::new(DashMap::new()),
             job_sequence: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -874,9 +1115,30 @@ mod tests {
                 .await
         });
 
-        let client = node::job_service_client::JobServiceClient::connect(format!("http://{addr}"))
-            .await
-            .expect("connect job service client");
+        let mut client = None;
+        let mut last_err = None;
+        for _ in 0..40 {
+            match node::job_service_client::JobServiceClient::connect(format!("http://{addr}"))
+                .await
+            {
+                Ok(connected) => {
+                    client = Some(connected);
+                    break;
+                }
+                Err(err) => {
+                    last_err = Some(err);
+                    sleep(Duration::from_millis(25)).await;
+                }
+            }
+        }
+
+        let client = client.unwrap_or_else(|| {
+            panic!(
+                "connect job service client: {}",
+                last_err
+                    .expect("expected connection error when client is unavailable")
+            )
+        });
 
         (client, shutdown_tx, server_task)
     }
@@ -1295,9 +1557,7 @@ mod tests {
         assert!(report.acknowledged);
 
         let status = service
-            .get_job_status(Request::new(GetJobStatusRequest {
-                job_id: job.job_id,
-            }))
+            .get_job_status(Request::new(GetJobStatusRequest { job_id: job.job_id }))
             .await
             .expect("status request should succeed")
             .into_inner();
@@ -1342,10 +1602,210 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
     }
 
+    #[tokio::test]
+    async fn extend_job_lease_transitions_job_to_running() {
+        let service = test_service();
+
+        let job = service
+            .submit_job(Request::new(SubmitJobRequest {
+                kind: "simulated".to_string(),
+                payload: "{}".to_string(),
+            }))
+            .await
+            .expect("submit should succeed")
+            .into_inner();
+
+        service
+            .lease_job(Request::new(LeaseJobRequest {
+                worker_id: "Worker-A".to_string(),
+            }))
+            .await
+            .expect("lease should succeed");
+
+        let extension = service
+            .extend_job_lease(Request::new(ExtendJobLeaseRequest {
+                worker_id: "Worker-A".to_string(),
+                job_id: job.job_id.clone(),
+            }))
+            .await
+            .expect("lease extension should succeed")
+            .into_inner();
+
+        assert!(extension.acknowledged);
+        assert!(!extension.cancel_requested);
+        assert_eq!(extension.lease_timeout_seconds, JOB_LEASE_TIMEOUT.as_secs());
+
+        let status = service
+            .get_job_status(Request::new(GetJobStatusRequest { job_id: job.job_id }))
+            .await
+            .expect("status should succeed")
+            .into_inner();
+
+        assert_eq!(status.state, JobRunState::Running as i32);
+        assert_eq!(status.assigned_worker_id, "Worker-A");
+    }
+
+    #[tokio::test]
+    async fn cancel_job_marks_queued_job_as_cancelled() {
+        let service = test_service();
+
+        let job = service
+            .submit_job(Request::new(SubmitJobRequest {
+                kind: "simulated".to_string(),
+                payload: "{}".to_string(),
+            }))
+            .await
+            .expect("submit should succeed")
+            .into_inner();
+
+        let cancel = service
+            .cancel_job(Request::new(CancelJobRequest {
+                job_id: job.job_id.clone(),
+                reason: "operator request".to_string(),
+            }))
+            .await
+            .expect("cancel should succeed")
+            .into_inner();
+
+        assert!(cancel.acknowledged);
+        assert_eq!(cancel.state, JobRunState::Cancelled as i32);
+
+        let status = service
+            .get_job_status(Request::new(GetJobStatusRequest { job_id: job.job_id }))
+            .await
+            .expect("status should succeed")
+            .into_inner();
+
+        assert_eq!(status.state, JobRunState::Cancelled as i32);
+        assert!(status.assigned_worker_id.is_empty());
+        assert!(status.error.contains("cancel"));
+    }
+
+    #[tokio::test]
+    async fn cancel_job_for_leased_job_waits_for_worker_ack() {
+        let service = test_service();
+
+        let job = service
+            .submit_job(Request::new(SubmitJobRequest {
+                kind: "simulated".to_string(),
+                payload: "{}".to_string(),
+            }))
+            .await
+            .expect("submit should succeed")
+            .into_inner();
+
+        service
+            .lease_job(Request::new(LeaseJobRequest {
+                worker_id: "Worker-A".to_string(),
+            }))
+            .await
+            .expect("lease should succeed");
+
+        let cancel = service
+            .cancel_job(Request::new(CancelJobRequest {
+                job_id: job.job_id.clone(),
+                reason: "draining node".to_string(),
+            }))
+            .await
+            .expect("cancel should succeed")
+            .into_inner();
+
+        assert_eq!(cancel.state, JobRunState::CancelRequested as i32);
+
+        let extension = service
+            .extend_job_lease(Request::new(ExtendJobLeaseRequest {
+                worker_id: "Worker-A".to_string(),
+                job_id: job.job_id.clone(),
+            }))
+            .await
+            .expect("lease extension should succeed")
+            .into_inner();
+
+        assert!(extension.cancel_requested);
+
+        service
+            .report_job_result(Request::new(ReportJobResultRequest {
+                worker_id: "Worker-A".to_string(),
+                job_id: job.job_id.clone(),
+                success: false,
+                output: String::new(),
+                error: "worker cancelled task".to_string(),
+            }))
+            .await
+            .expect("report should succeed for cooperative cancel");
+
+        let status = service
+            .get_job_status(Request::new(GetJobStatusRequest { job_id: job.job_id }))
+            .await
+            .expect("status should succeed")
+            .into_inner();
+
+        assert_eq!(status.state, JobRunState::Cancelled as i32);
+        assert!(status.error.contains("cancel"));
+    }
+
+    #[tokio::test]
+    async fn failed_job_retries_before_terminal_failure() {
+        let service = test_service();
+
+        let job = service
+            .submit_job(Request::new(SubmitJobRequest {
+                kind: "simulated".to_string(),
+                payload: "{}".to_string(),
+            }))
+            .await
+            .expect("submit should succeed")
+            .into_inner();
+
+        for attempt in 1..=JOB_MAX_ATTEMPTS {
+            let lease = service
+                .lease_job(Request::new(LeaseJobRequest {
+                    worker_id: format!("Worker-{attempt}"),
+                }))
+                .await
+                .expect("lease should succeed")
+                .into_inner();
+
+            assert!(lease.has_job);
+            assert_eq!(lease.job_id, job.job_id);
+
+            service
+                .report_job_result(Request::new(ReportJobResultRequest {
+                    worker_id: format!("Worker-{attempt}"),
+                    job_id: job.job_id.clone(),
+                    success: false,
+                    output: String::new(),
+                    error: format!("attempt {attempt} failed"),
+                }))
+                .await
+                .expect("report should succeed");
+
+            let status = service
+                .get_job_status(Request::new(GetJobStatusRequest {
+                    job_id: job.job_id.clone(),
+                }))
+                .await
+                .expect("status should succeed")
+                .into_inner();
+
+            if attempt < JOB_MAX_ATTEMPTS {
+                assert_eq!(status.state, JobRunState::Queued as i32);
+                let mut retry = service
+                    .job_retries
+                    .get_mut(&job.job_id)
+                    .expect("retry metadata should exist");
+                retry.next_eligible_at = Instant::now() - Duration::from_millis(1);
+            } else {
+                assert_eq!(status.state, JobRunState::Failed as i32);
+            }
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn grpc_happy_path_submit_lease_and_complete_job() {
         let service = test_service();
-        let (mut client, shutdown_tx, server_task) = spawn_job_service_server(service.clone()).await;
+        let (mut client, shutdown_tx, server_task) =
+            spawn_job_service_server(service.clone()).await;
 
         let submit = client
             .submit_job(Request::new(SubmitJobRequest {
@@ -1411,7 +1871,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn grpc_requeues_timed_out_lease_for_new_worker() {
         let service = test_service();
-        let (mut client, shutdown_tx, server_task) = spawn_job_service_server(service.clone()).await;
+        let (mut client, shutdown_tx, server_task) =
+            spawn_job_service_server(service.clone()).await;
 
         let submit = client
             .submit_job(Request::new(SubmitJobRequest {
@@ -1470,6 +1931,75 @@ mod tests {
         stop_job_service_server(shutdown_tx, server_task).await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn grpc_cancel_requested_job_becomes_cancelled_after_lease_timeout() {
+        let service = test_service();
+        let (mut client, shutdown_tx, server_task) =
+            spawn_job_service_server(service.clone()).await;
+
+        let submit = client
+            .submit_job(Request::new(SubmitJobRequest {
+                kind: "simulated".to_string(),
+                payload: "{\"work\":3}".to_string(),
+            }))
+            .await
+            .expect("submit should succeed")
+            .into_inner();
+
+        client
+            .lease_job(Request::new(LeaseJobRequest {
+                worker_id: "Worker-IT-A".to_string(),
+            }))
+            .await
+            .expect("lease should succeed");
+
+        let cancel = client
+            .cancel_job(Request::new(CancelJobRequest {
+                job_id: submit.job_id.clone(),
+                reason: "node drained".to_string(),
+            }))
+            .await
+            .expect("cancel should succeed")
+            .into_inner();
+
+        assert_eq!(cancel.state, JobRunState::CancelRequested as i32);
+
+        {
+            let mut record = service
+                .jobs
+                .get_mut(&submit.job_id)
+                .expect("cancel-requested job should exist");
+            let lease = record
+                .lease
+                .as_mut()
+                .expect("cancel-requested job should include lease metadata");
+            lease.leased_at = Instant::now() - Duration::from_secs(30);
+        }
+
+        let lease_after_timeout = client
+            .lease_job(Request::new(LeaseJobRequest {
+                worker_id: "Worker-IT-B".to_string(),
+            }))
+            .await
+            .expect("lease call should succeed")
+            .into_inner();
+
+        assert!(!lease_after_timeout.has_job);
+
+        let status = client
+            .get_job_status(Request::new(GetJobStatusRequest {
+                job_id: submit.job_id,
+            }))
+            .await
+            .expect("status should succeed")
+            .into_inner();
+
+        assert_eq!(status.state, JobRunState::Cancelled as i32);
+        assert!(status.assigned_worker_id.is_empty());
+
+        stop_job_service_server(shutdown_tx, server_task).await;
+    }
+
     #[test]
     fn job_lease_expiration_tracks_timeout_boundary() {
         let start = Instant::now();
@@ -1481,6 +2011,14 @@ mod tests {
 
         assert!(!lease.is_expired(start + Duration::from_secs(10)));
         assert!(lease.is_expired(start + Duration::from_secs(11)));
+    }
+
+    #[test]
+    fn retry_delay_scales_and_caps() {
+        assert_eq!(retry_delay_for_attempt(1), Duration::from_secs(2));
+        assert_eq!(retry_delay_for_attempt(2), Duration::from_secs(4));
+        assert_eq!(retry_delay_for_attempt(3), Duration::from_secs(8));
+        assert_eq!(retry_delay_for_attempt(10), Duration::from_secs(30));
     }
 
     #[test]
@@ -1541,5 +2079,39 @@ mod tests {
             .expect("fresh leased job should still exist in map");
         assert_eq!(fresh_job.state, JobState::Leased);
         assert!(fresh_job.lease.is_some());
+    }
+
+    #[test]
+    fn requeue_expired_cancel_requested_job_marks_cancelled() {
+        let jobs = DashMap::new();
+        let now = Instant::now();
+
+        jobs.insert(
+            "job-000010".to_string(),
+            JobRecord {
+                job_id: "job-000010".to_string(),
+                kind: "simulated".to_string(),
+                payload: "{}".to_string(),
+                state: JobState::CancelRequested,
+                lease: Some(JobLease {
+                    worker_id: "Worker-A".to_string(),
+                    leased_at: now - Duration::from_secs(30),
+                    lease_timeout: Duration::from_secs(10),
+                }),
+                output: None,
+                error: Some("cancel requested".to_string()),
+                created_at: now - Duration::from_secs(60),
+                updated_at: now - Duration::from_secs(30),
+            },
+        );
+
+        let requeued = requeue_expired_jobs(&jobs, now);
+        assert_eq!(requeued, 0);
+
+        let cancelled = jobs
+            .get("job-000010")
+            .expect("cancelled job should still exist in map");
+        assert_eq!(cancelled.state, JobState::Cancelled);
+        assert!(cancelled.lease.is_none());
     }
 }
