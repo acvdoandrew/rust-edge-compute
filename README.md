@@ -110,9 +110,15 @@ grpcurl -plaintext -import-path proto -proto node.proto \
 
 What to expect:
 - Workers poll `LeaseJob`, execute `kind=simulated`, then send `ReportJobResult`.
+- Workers renew active leases with `ExtendJobLease` while a job is running.
 - Payloads containing `fail` intentionally produce a failed simulated job result.
+- Failed jobs retry automatically (max 3 attempts) with exponential backoff (`2s`, `4s`, `8s`) before moving to `FAILED`.
 - If a worker disappears after leasing, the server requeues the job after the lease timeout (15s) so another worker can pick it up.
+- `CancelJob` is cooperative for leased/running work: queued jobs cancel immediately, active jobs move to `CANCEL_REQUESTED` and finalize to `CANCELLED` when the worker reports or when its lease expires.
 - The orchestrator TUI shows queue/run counters in `Jobs Q/L/R/S/F` and a recent jobs panel.
+
+Optional directives for simulated jobs:
+- Include `sleep_ms=<N>` in payload to emulate longer-running work and exercise lease renewal/cancellation behavior.
 
 ## ✅ Quality Gates
 
