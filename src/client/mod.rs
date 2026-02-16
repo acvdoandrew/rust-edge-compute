@@ -5,6 +5,8 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::sleep;
 
+mod backoff;
+
 pub mod node {
     tonic::include_proto!("node");
 }
