@@ -14,7 +14,33 @@ pub mod node {
 
 use node::job_service_client::JobServiceClient;
 use node::node_service_client::NodeServiceClient;
-use node::{DisconnectRequest, HeartbeatRequest, LeaseJobRequest};
+use node::{DisconnectRequest, HeartbeatRequest, LeaseJobRequest, ReportJobResultRequest};
+
+async fn execute_simulated_job(kind: &str, payload: &str) -> (bool, String, String) {
+    sleep(Duration::from_millis(250)).await;
+
+    if !kind.eq_ignore_ascii_case("simulated") {
+        return (
+            false,
+            String::new(),
+            format!("unsupported job kind: {kind}"),
+        );
+    }
+
+    if payload.contains("fail") {
+        return (
+            false,
+            String::new(),
+            "simulated job failed due to payload directive".to_string(),
+        );
+    }
+
+    (
+        true,
+        format!("simulated job completed (payload={payload})"),
+        String::new(),
+    )
+}
 
 pub async fn start_client(
     state: Arc<Mutex<Option<GpuStats>>>,
@@ -108,6 +134,21 @@ pub async fn start_client(
                                         lease.job_id,
                                         lease.kind
                                     );
+
+                                    let (success, output, error) =
+                                        execute_simulated_job(&lease.kind, &lease.payload).await;
+
+                                    let report = tonic::Request::new(ReportJobResultRequest {
+                                        worker_id: node_id.clone(),
+                                        job_id: lease.job_id.clone(),
+                                        success,
+                                        output,
+                                        error,
+                                    });
+
+                                    if client.report_job_result(report).await.is_err() {
+                                        job_client = None;
+                                    }
                                 }
                             }
                             Err(_) => {
