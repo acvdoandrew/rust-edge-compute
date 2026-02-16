@@ -28,6 +28,9 @@ struct Args {
 
     #[arg(long = "telemetry-backend", value_enum, default_value_t = TelemetryBackendArg::Auto)]
     telemetry_backend: TelemetryBackendArg,
+
+    #[arg(long = "gpu-index", default_value_t = 0)]
+    gpu_index: u32,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -49,12 +52,13 @@ impl TelemetryBackendArg {
 
 fn init_telemetry_source(
     backend: TelemetryBackendArg,
+    gpu_index: u32,
 ) -> anyhow::Result<(Box<dyn telemetry::TelemetrySource>, String)> {
-    init_telemetry_source_with_factory(backend, init_nvml_source)
+    init_telemetry_source_with_factory(backend, || init_nvml_source(gpu_index))
 }
 
-fn init_nvml_source() -> anyhow::Result<Box<dyn telemetry::TelemetrySource>> {
-    let source = telemetry::NvmlSource::new(0)
+fn init_nvml_source(gpu_index: u32) -> anyhow::Result<Box<dyn telemetry::TelemetrySource>> {
+    let source = telemetry::NvmlSource::new(gpu_index)
         .context("nvml backend requested but initialization failed")?;
     Ok(Box::new(source))
 }
@@ -108,8 +112,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Telemetry backend requested: {}",
         args.telemetry_backend.as_str()
     );
+    println!("GPU index requested: {}", args.gpu_index);
 
-    let (telemetry_source, backend_status) = init_telemetry_source(args.telemetry_backend)?;
+    let (telemetry_source, backend_status) =
+        init_telemetry_source(args.telemetry_backend, args.gpu_index)?;
     println!("Telemetry backend active: {}", backend_status);
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
