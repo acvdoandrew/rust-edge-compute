@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use anyhow::Context;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
 use rand::Rng;
@@ -36,6 +37,39 @@ enum TelemetryBackendArg {
     Auto,
 }
 
+impl TelemetryBackendArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Sim => "sim",
+            Self::Nvml => "nvml",
+            Self::Auto => "auto",
+        }
+    }
+}
+
+fn init_telemetry_source(
+    backend: TelemetryBackendArg,
+) -> anyhow::Result<(Box<dyn telemetry::TelemetrySource>, String)> {
+    match backend {
+        TelemetryBackendArg::Sim => Ok((
+            Box::new(telemetry::SimulatedSource::new()),
+            "sim".to_string(),
+        )),
+        TelemetryBackendArg::Nvml => {
+            let source = telemetry::NvmlSource::new(0)
+                .context("nvml backend requested but initialization failed")?;
+            Ok((Box::new(source), "nvml".to_string()))
+        }
+        TelemetryBackendArg::Auto => match telemetry::NvmlSource::new(0) {
+            Ok(source) => Ok((Box::new(source), "auto -> nvml".to_string())),
+            Err(err) => Ok((
+                Box::new(telemetry::SimulatedSource::new()),
+                format!("auto -> sim (nvml unavailable: {err})"),
+            )),
+        },
+    }
+}
+
 struct AppState {
     should_quit: bool,
     latest_stats: Option<telemetry::GpuStats>,
@@ -55,19 +89,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| format!("Node-{}", rand::thread_rng().gen_range(1000..9999)));
 
     println!("🚀 Edge Compute Node Initializing ID: {}...", node_id);
-    println!(
-        "Telemetry backend selected: {}",
-        match args.telemetry_backend {
-            TelemetryBackendArg::Sim => "sim",
-            TelemetryBackendArg::Nvml => "nvml",
-            TelemetryBackendArg::Auto => "auto",
-        }
-    );
+    println!("Telemetry backend requested: {}", args.telemetry_backend.as_str());
+
+    let (telemetry_source, backend_status) = init_telemetry_source(args.telemetry_backend)?;
+    println!("Telemetry backend active: {}", backend_status);
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (tx, mut rx) = mpsc::channel(32);
-    let telemetry_source: Box<dyn telemetry::TelemetrySource> =
-        Box::new(telemetry::SimulatedSource::new());
     let telemetry_task = tokio::spawn(telemetry::run_monitoring_agent(
         tx,
         node_id.clone(),
