@@ -12,7 +12,7 @@
 
 This system uses an asynchronous **Actor Model** architecture to decouple data generation, rendering, and networking.
 
-*   **Telemetry Actor:** Streams hardware stats (Temperature, VRAM, Usage) from a pluggable source (`sim`, `nvml`, or `auto`).
+*   **Telemetry Actor:** Streams hardware stats (Temperature, VRAM, Usage) from a pluggable source (`sim`, `nvml`, `amd-sysfs`, or `auto`).
 *   **TUI Actor (Main Thread):** Renders a 60 FPS terminal dashboard using `ratatui`.
 *   **Network Client:** A background gRPC worker that streams Heartbeats to the Orchestrator.
 *   **State Management:** Uses `Arc<Mutex<State>>` to share live telemetry between the rendering loop and the network client without blocking.
@@ -21,7 +21,7 @@ This system uses an asynchronous **Actor Model** architecture to decouple data g
 
 *   **Distributed Orchestration:** A central Server (`bin/server`) handling concurrent connections from multiple Nodes.
 *   **High-Performance TUI:** Real-time client and orchestrator dashboards powered by `ratatui` v0.29.
-*   **Pluggable Telemetry HAL:** Runtime-selectable telemetry backend (`--telemetry-backend sim|nvml|auto`) with deterministic `auto` fallback.
+*   **Pluggable Telemetry HAL:** Runtime-selectable telemetry backend (`--telemetry-backend sim|nvml|amd-sysfs|auto`) with deterministic `auto` fallback.
 *   **Fault Tolerance:** Client reconnects with jittered exponential backoff (capped) and resets the backoff after a successful reconnect.
 *   **Richer Heartbeats:** Nodes send temperature, usage, VRAM bytes, uptime, and client version on every heartbeat.
 *   **Node Lifecycle Hygiene:** Orchestrator marks stale nodes, evicts long-stale entries via TTL, and tracks total evictions.
@@ -60,6 +60,12 @@ cargo run --bin rust-edge-compute -- --telemetry-backend sim
 
 # Force NVML telemetry (fails fast if NVML/GPU is unavailable)
 cargo run --bin rust-edge-compute -- --telemetry-backend nvml
+
+# Force AMD Linux sysfs telemetry (fails fast if amdgpu sysfs is unavailable)
+cargo run --bin rust-edge-compute -- --telemetry-backend amd-sysfs
+
+# Select a specific GPU index (cardN for amd-sysfs, device index for nvml)
+cargo run --bin rust-edge-compute -- --telemetry-backend auto --gpu-index 1
 ```
 * **Observe**: The Client TUI will launch, displaying live stats.
 * **Verify**: Check the Server TUI table. Connected node rows, heartbeat counters, usage, VRAM, uptime, and version should update in real time.
@@ -77,6 +83,12 @@ Notes:
 - `tmux` mode opens a 3-pane live session (server + 2 clients).
 - `headless` mode runs a non-visual smoke test and validates startup/shutdown logs.
 - `manual` mode prints explicit multi-terminal commands.
+
+Telemetry backend notes:
+- `auto` fallback order is `nvml -> amd-sysfs -> sim`.
+- `nvml` requires NVIDIA driver libraries to be present on the node.
+- `amd-sysfs` requires Linux with the `amdgpu` kernel driver and `/sys/class/drm/cardN/device` metrics.
+- `--gpu-index` defaults to `0`; increase it to target another GPU.
 
 ## ✅ Quality Gates
 
@@ -104,7 +116,7 @@ This repository includes a GitHub Actions workflow that runs on pushes and PRs t
 - [x] **CLI Configuration:** Add `clap` to parse arguments (`--server <IP>`, `--id <NAME>`).
 - [x] **Orchestrator Dashboard:** Upgrade Server from stdout logs to a real-time TUI table of connected nodes.
 - [x] **Graceful Shutdown:** Handle `Ctrl+C` signals to disconnect cleanly from the mesh.
-- [x] **Hardware HAL:** Implement `nvml-wrapper` telemetry source with runtime backend selection and `auto` fallback.
+- [x] **Hardware HAL:** Implement `nvml-wrapper` + `amd-sysfs` telemetry sources with runtime backend selection and `auto` fallback.
 - [x] **Reconnect Backoff:** Replace fixed retry delay with exponential backoff + jitter + reset-on-success.
 - [x] **Protocol Expansion:** Extend heartbeat payload to include usage, VRAM, uptime, and client version.
 - [x] **Stale Eviction:** Add TTL-based stale node pruning with eviction counters on the orchestrator dashboard.
