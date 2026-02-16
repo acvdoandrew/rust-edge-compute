@@ -143,6 +143,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (telemetry_source, backend_status) =
         init_telemetry_source(args.telemetry_backend, args.gpu_index)?;
     println!("Telemetry backend active: {}", backend_status);
+    let worker_capabilities = vec![
+        format!("telemetry:{}", telemetry_source.backend_name()),
+        "executor:simulated".to_string(),
+    ];
+    println!("Worker capabilities: {}", worker_capabilities.join(", "));
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (tx, mut rx) = mpsc::channel(32);
@@ -160,6 +165,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         client_state,
         node_id.clone(),
         args.server_addr,
+        worker_capabilities,
         shutdown_rx.clone(),
     ));
 

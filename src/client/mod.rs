@@ -103,6 +103,7 @@ pub async fn start_client(
     state: Arc<Mutex<Option<GpuStats>>>,
     node_id: String,
     server_addr: String,
+    worker_capabilities: Vec<String>,
     shutdown_rx: watch::Receiver<bool>,
 ) {
     let mut shutdown_rx = shutdown_rx;
@@ -181,7 +182,7 @@ pub async fn start_client(
                     if let Some(client) = job_client.as_mut() {
                         let lease_request = tonic::Request::new(LeaseJobRequest {
                             worker_id: node_id.clone(),
-                            worker_capabilities: Vec::new(),
+                            worker_capabilities: worker_capabilities.clone(),
                         });
                         match client.lease_job(lease_request).await {
                             Ok(response) => {

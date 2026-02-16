@@ -104,6 +104,7 @@ async fn node_client_lifecycle_emits_heartbeat_then_disconnect() {
         shared_state,
         "Node-IT".to_string(),
         format!("http://{}", addr),
+        vec!["telemetry:simulated".to_string(), "executor:simulated".to_string()],
         client_shutdown_rx,
     ));
 
