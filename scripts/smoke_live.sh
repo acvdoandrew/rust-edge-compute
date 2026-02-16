@@ -69,9 +69,10 @@ run_headless_smoke() {
     server_pid=""
 
     cleanup() {
-        if [[ -n "${server_pid}" ]] && kill -0 "${server_pid}" >/dev/null 2>&1; then
-            kill -TERM "${server_pid}" >/dev/null 2>&1 || true
-            wait "${server_pid}" >/dev/null 2>&1 || true
+        local pid="${server_pid:-}"
+        if [[ -n "${pid}" ]] && kill -0 "${pid}" >/dev/null 2>&1; then
+            kill -TERM "${pid}" >/dev/null 2>&1 || true
+            wait "${pid}" >/dev/null 2>&1 || true
         fi
     }
     trap cleanup EXIT INT TERM
@@ -124,8 +125,10 @@ run_headless_smoke() {
     fi
 
     echo "[smoke] stopping server..."
-    kill -INT "${server_pid}" >/dev/null 2>&1 || true
-    wait "${server_pid}" || true
+    if [[ -n "${server_pid:-}" ]]; then
+        kill -INT "${server_pid}" >/dev/null 2>&1 || true
+        wait "${server_pid}" || true
+    fi
     server_pid=""
 
     echo "[smoke] validating logs..."
