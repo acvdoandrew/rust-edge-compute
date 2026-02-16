@@ -3,9 +3,11 @@ use std::fmt::{self};
 use tokio::sync::{mpsc, watch};
 use tokio::time::{sleep, Duration};
 
+mod amd_sysfs;
 mod nvml;
 mod simulated;
 
+pub use amd_sysfs::AmdSysfsSource;
 pub use nvml::NvmlSource;
 pub use simulated::SimulatedSource;
 

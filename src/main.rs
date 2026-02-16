@@ -71,8 +71,10 @@ fn init_nvml_source(gpu_index: u32) -> anyhow::Result<Box<dyn telemetry::Telemet
     Ok(Box::new(source))
 }
 
-fn init_amd_sysfs_source(_gpu_index: u32) -> anyhow::Result<Box<dyn telemetry::TelemetrySource>> {
-    anyhow::bail!("amd-sysfs backend requested but source is not implemented yet")
+fn init_amd_sysfs_source(gpu_index: u32) -> anyhow::Result<Box<dyn telemetry::TelemetrySource>> {
+    let source = telemetry::AmdSysfsSource::new(gpu_index)
+        .context("amd-sysfs backend requested but initialization failed")?;
+    Ok(Box::new(source))
 }
 
 fn init_telemetry_source_with_factory<F>(
