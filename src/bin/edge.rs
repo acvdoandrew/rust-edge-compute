@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Args as ClapArgs, Parser, Subcommand, ValueEnum};
 use std::io;
 use std::path::Path;
 use std::process::{self, Command, ExitStatus, Stdio};
@@ -13,20 +13,63 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum EdgeCommand {
     /// Run the orchestrator server
-    Server {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
+    Server(ServerArgs),
     /// Run a worker node
-    Node {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
+    Node(NodeArgs),
     /// Submit and manage jobs
     Job {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+}
+
+const DEFAULT_BIND_ADDR: &str = "[::1]:50051";
+const DEFAULT_SERVER_ADDR: &str = "http://[::1]:50051";
+
+#[derive(ClapArgs, Debug)]
+struct ServerArgs {
+    #[arg(short = 'b', long, default_value = DEFAULT_BIND_ADDR)]
+    bind: String,
+
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    extra_args: Vec<String>,
+}
+
+#[derive(ClapArgs, Debug)]
+struct NodeArgs {
+    #[arg(short = 's', long, default_value = DEFAULT_SERVER_ADDR)]
+    server: String,
+
+    #[arg(short = 'i', long)]
+    id: Option<String>,
+
+    #[arg(short = 'p', long, value_enum, default_value_t = NodeProfile::Auto)]
+    profile: NodeProfile,
+
+    #[arg(short = 'g', long, default_value_t = 0)]
+    gpu_index: u32,
+
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    extra_args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum NodeProfile {
+    Auto,
+    Sim,
+    Nvml,
+    AmdSysfs,
+}
+
+impl NodeProfile {
+    fn telemetry_backend(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Sim => "sim",
+            Self::Nvml => "nvml",
+            Self::AmdSysfs => "amd-sysfs",
+        }
+    }
 }
 
 fn spawn_with_stdio(mut command: Command, args: &[String]) -> io::Result<ExitStatus> {
@@ -68,8 +111,27 @@ fn run_legacy_binary(binary: &str, args: &[String]) -> io::Result<ExitStatus> {
 
 fn forward(command: EdgeCommand) -> (&'static str, Vec<String>) {
     match command {
-        EdgeCommand::Server { args } => ("server", args),
-        EdgeCommand::Node { args } => ("rust-edge-compute", args),
+        EdgeCommand::Server(server) => {
+            let mut args = vec!["--bind".to_string(), server.bind];
+            args.extend(server.extra_args);
+            ("server", args)
+        }
+        EdgeCommand::Node(node) => {
+            let mut args = vec!["--server".to_string(), node.server];
+
+            if let Some(id) = node.id {
+                args.push("--id".to_string());
+                args.push(id);
+            }
+
+            args.push("--telemetry-backend".to_string());
+            args.push(node.profile.telemetry_backend().to_string());
+            args.push("--gpu-index".to_string());
+            args.push(node.gpu_index.to_string());
+            args.extend(node.extra_args);
+
+            ("rust-edge-compute", args)
+        }
         EdgeCommand::Job { args } => ("jobctl", args),
     }
 }
