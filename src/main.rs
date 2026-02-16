@@ -104,7 +104,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| format!("Node-{}", rand::thread_rng().gen_range(1000..9999)));
 
     println!("🚀 Edge Compute Node Initializing ID: {}...", node_id);
-    println!("Telemetry backend requested: {}", args.telemetry_backend.as_str());
+    println!(
+        "Telemetry backend requested: {}",
+        args.telemetry_backend.as_str()
+    );
 
     let (telemetry_source, backend_status) = init_telemetry_source(args.telemetry_backend)?;
     println!("Telemetry backend active: {}", backend_status);
@@ -276,10 +279,11 @@ mod tests {
 
     #[test]
     fn init_source_auto_falls_back_to_sim_when_nvml_unavailable() {
-        let (source, status) = init_telemetry_source_with_factory(TelemetryBackendArg::Auto, || {
-            Err(anyhow!("nvml unavailable"))
-        })
-        .expect("auto backend should fall back to simulated source");
+        let (source, status) =
+            init_telemetry_source_with_factory(TelemetryBackendArg::Auto, || {
+                Err(anyhow!("nvml unavailable"))
+            })
+            .expect("auto backend should fall back to simulated source");
 
         assert_eq!(source.backend_name(), "simulated");
         assert!(status.starts_with("auto -> sim"));
@@ -287,10 +291,11 @@ mod tests {
 
     #[test]
     fn init_source_auto_prefers_nvml_when_available() {
-        let (source, status) = init_telemetry_source_with_factory(TelemetryBackendArg::Auto, || {
-            Ok(fixed_source("nvml"))
-        })
-        .expect("auto backend should use nvml source when available");
+        let (source, status) =
+            init_telemetry_source_with_factory(TelemetryBackendArg::Auto, || {
+                Ok(fixed_source("nvml"))
+            })
+            .expect("auto backend should use nvml source when available");
 
         assert_eq!(status, "auto -> nvml");
         assert_eq!(source.backend_name(), "nvml");

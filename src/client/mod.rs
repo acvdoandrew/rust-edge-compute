@@ -22,7 +22,8 @@ pub async fn start_client(
     shutdown_rx: watch::Receiver<bool>,
 ) {
     let mut shutdown_rx = shutdown_rx;
-    let mut reconnect_backoff = ExponentialBackoff::new(Duration::from_secs(1), Duration::from_secs(30));
+    let mut reconnect_backoff =
+        ExponentialBackoff::new(Duration::from_secs(1), Duration::from_secs(30));
     let mut should_backoff = false;
     let started_at = Instant::now();
     let client_version = env!("CARGO_PKG_VERSION").to_string();

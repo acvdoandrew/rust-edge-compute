@@ -3,11 +3,11 @@ use std::fmt::{self};
 use tokio::sync::{mpsc, watch};
 use tokio::time::{sleep, Duration};
 
-mod simulated;
 mod nvml;
+mod simulated;
 
-pub use simulated::SimulatedSource;
 pub use nvml::NvmlSource;
+pub use simulated::SimulatedSource;
 
 #[derive(Debug, Clone)]
 pub struct GpuStats {
