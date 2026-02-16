@@ -1,7 +1,7 @@
 use crate::telemetry::GpuStats;
 use std::sync::{Arc, Mutex};
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tokio::time::sleep;
 
@@ -24,6 +24,8 @@ pub async fn start_client(
     let mut shutdown_rx = shutdown_rx;
     let mut reconnect_backoff = ExponentialBackoff::new(Duration::from_secs(1), Duration::from_secs(30));
     let mut should_backoff = false;
+    let started_at = Instant::now();
+    let client_version = env!("CARGO_PKG_VERSION").to_string();
 
     loop {
         if *shutdown_rx.borrow() {
@@ -68,18 +70,21 @@ pub async fn start_client(
                         return;
                     }
 
-                    let temp = {
+                    let (temp, usage, vram_used) = {
                         let lock = state.lock().unwrap();
                         match &*lock {
-                            Some(s) => s.temperature,
-                            None => 0.0,
+                            Some(s) => (s.temperature, s.usage, s.vram_used),
+                            None => (0.0, 0.0, 0),
                         }
                     };
 
                     let request = tonic::Request::new(HeartbeatRequest {
                         node_id: node_id.clone(),
                         gpu_temp: temp,
-                        ..Default::default()
+                        gpu_usage: usage,
+                        vram_used_bytes: vram_used,
+                        uptime_seconds: started_at.elapsed().as_secs(),
+                        client_version: client_version.clone(),
                     });
 
                     if client.heartbeat(request).await.is_err() {
