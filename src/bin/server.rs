@@ -81,6 +81,7 @@ struct DashboardSnapshot {
     total_nodes: usize,
     healthy_nodes: usize,
     stale_nodes: usize,
+    total_evicted_nodes: u64,
     total_heartbeats: u64,
 }
 
@@ -162,6 +163,7 @@ fn prune_stale_nodes(state: &DashMap<String, NodeStatus>, now: Instant, evict_af
 fn build_dashboard_snapshot(
     state: &DashMap<String, NodeStatus>,
     total_heartbeats: u64,
+    total_evicted_nodes: u64,
     stale_after: Duration,
 ) -> DashboardSnapshot {
     let now = Instant::now();
@@ -198,6 +200,7 @@ fn build_dashboard_snapshot(
         total_nodes: rows.len(),
         healthy_nodes,
         stale_nodes,
+        total_evicted_nodes,
         total_heartbeats,
         rows,
     }
@@ -220,9 +223,10 @@ fn render_dashboard(frame: &mut ratatui::Frame, snapshot: &DashboardSnapshot) {
         .split(frame.area());
 
     let summary = Paragraph::new(format!(
-        "Active: {}  |  Stale: {}  |  Total Nodes: {}  |  Total Heartbeats: {}",
+        "Active: {}  |  Stale: {}  |  Evicted: {}  |  Total Nodes: {}  |  Total Heartbeats: {}",
         snapshot.healthy_nodes,
         snapshot.stale_nodes,
+        snapshot.total_evicted_nodes,
         snapshot.total_nodes,
         snapshot.total_heartbeats
     ))
@@ -315,16 +319,20 @@ async fn run_dashboard_loop(
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
 ) -> Result<(), Box<dyn Error>> {
+    let mut total_evicted_nodes = 0u64;
+
     loop {
         if *shutdown_rx.borrow() {
             break;
         }
 
-        let _ = prune_stale_nodes(&state, Instant::now(), EVICT_AFTER);
+        total_evicted_nodes = total_evicted_nodes
+            .saturating_add(prune_stale_nodes(&state, Instant::now(), EVICT_AFTER) as u64);
 
         let snapshot = build_dashboard_snapshot(
             &state,
             total_heartbeats.load(Ordering::Relaxed),
+            total_evicted_nodes,
             STALE_AFTER,
         );
         terminal.draw(|frame| render_dashboard(frame, &snapshot))?;
@@ -475,11 +483,12 @@ mod tests {
     #[test]
     fn build_dashboard_snapshot_handles_empty_state() {
         let state = DashMap::new();
-        let snapshot = build_dashboard_snapshot(&state, 0, STALE_AFTER);
+        let snapshot = build_dashboard_snapshot(&state, 0, 0, STALE_AFTER);
 
         assert_eq!(snapshot.total_nodes, 0);
         assert_eq!(snapshot.healthy_nodes, 0);
         assert_eq!(snapshot.stale_nodes, 0);
+        assert_eq!(snapshot.total_evicted_nodes, 0);
         assert_eq!(snapshot.total_heartbeats, 0);
         assert!(snapshot.rows.is_empty());
     }
@@ -516,11 +525,12 @@ mod tests {
             },
         );
 
-        let snapshot = build_dashboard_snapshot(&state, 5, STALE_AFTER);
+        let snapshot = build_dashboard_snapshot(&state, 5, 2, STALE_AFTER);
 
         assert_eq!(snapshot.total_nodes, 2);
         assert_eq!(snapshot.healthy_nodes, 1);
         assert_eq!(snapshot.stale_nodes, 1);
+        assert_eq!(snapshot.total_evicted_nodes, 2);
         assert_eq!(snapshot.total_heartbeats, 5);
         assert_eq!(snapshot.rows[0].node_id, "Node-A");
         assert_eq!(snapshot.rows[0].health, NodeHealth::Stale);
@@ -534,6 +544,45 @@ mod tests {
         assert_eq!(snapshot.rows[1].last_vram_used_bytes, 3_000_000_000);
         assert_eq!(snapshot.rows[1].last_uptime_seconds, 40);
         assert_eq!(snapshot.rows[1].client_version, "0.1.0");
+    }
+
+    #[test]
+    fn prune_stale_nodes_removes_entries_past_ttl() {
+        let state = DashMap::new();
+        let now = Instant::now();
+
+        state.insert(
+            "Node-Old".to_string(),
+            NodeStatus {
+                node_id: "Node-Old".to_string(),
+                last_temp_c: 70.0,
+                last_usage: 0.90,
+                last_vram_used_bytes: 9_000_000_000,
+                last_uptime_seconds: 500,
+                client_version: "0.1.0".to_string(),
+                last_seen: now - Duration::from_secs(90),
+                heartbeat_count: 5,
+            },
+        );
+        state.insert(
+            "Node-Fresh".to_string(),
+            NodeStatus {
+                node_id: "Node-Fresh".to_string(),
+                last_temp_c: 55.0,
+                last_usage: 0.40,
+                last_vram_used_bytes: 2_000_000_000,
+                last_uptime_seconds: 100,
+                client_version: "0.1.0".to_string(),
+                last_seen: now - Duration::from_secs(5),
+                heartbeat_count: 2,
+            },
+        );
+
+        let removed = prune_stale_nodes(&state, now, Duration::from_secs(60));
+
+        assert_eq!(removed, 1);
+        assert!(state.get("Node-Old").is_none());
+        assert!(state.get("Node-Fresh").is_some());
     }
 
     #[test]
