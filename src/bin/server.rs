@@ -94,6 +94,9 @@ struct DashboardSnapshot {
     healthy_nodes: usize,
     stale_nodes: usize,
     queued_jobs: usize,
+    queued_high_jobs: usize,
+    queued_normal_jobs: usize,
+    queued_low_jobs: usize,
     leased_jobs: usize,
     running_jobs: usize,
     succeeded_jobs: usize,
@@ -106,6 +109,7 @@ struct DashboardSnapshot {
 struct JobRow {
     job_id: String,
     state: JobState,
+    priority: JobPriority,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +131,14 @@ enum JobPriority {
 }
 
 impl JobPriority {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::High => "High",
+            Self::Normal => "Normal",
+            Self::Low => "Low",
+        }
+    }
+
     fn rank_for_queue(self) -> u8 {
         match self {
             Self::High => 0,
@@ -393,6 +405,9 @@ fn build_dashboard_snapshot(
     let mut healthy_nodes = 0usize;
     let mut stale_nodes = 0usize;
     let mut queued_jobs = 0usize;
+    let mut queued_high_jobs = 0usize;
+    let mut queued_normal_jobs = 0usize;
+    let mut queued_low_jobs = 0usize;
     let mut leased_jobs = 0usize;
     let mut running_jobs = 0usize;
     let mut succeeded_jobs = 0usize;
@@ -425,7 +440,14 @@ fn build_dashboard_snapshot(
         let job = entry.value();
 
         match job.state {
-            JobState::Queued => queued_jobs += 1,
+            JobState::Queued => {
+                queued_jobs += 1;
+                match job.priority {
+                    JobPriority::High => queued_high_jobs += 1,
+                    JobPriority::Normal => queued_normal_jobs += 1,
+                    JobPriority::Low => queued_low_jobs += 1,
+                }
+            }
             JobState::Leased => leased_jobs += 1,
             JobState::Running => running_jobs += 1,
             JobState::CancelRequested => running_jobs += 1,
@@ -437,6 +459,7 @@ fn build_dashboard_snapshot(
         recent_jobs.push(JobRow {
             job_id: job.job_id.clone(),
             state: job.state,
+            priority: job.priority,
         });
     }
 
@@ -448,6 +471,9 @@ fn build_dashboard_snapshot(
         healthy_nodes,
         stale_nodes,
         queued_jobs,
+        queued_high_jobs,
+        queued_normal_jobs,
+        queued_low_jobs,
         leased_jobs,
         running_jobs,
         succeeded_jobs,
@@ -477,7 +503,7 @@ fn render_dashboard(frame: &mut ratatui::Frame, snapshot: &DashboardSnapshot) {
         .split(frame.area());
 
     let summary = Paragraph::new(format!(
-        "Active: {}  |  Stale: {}  |  Evicted: {}  |  Total Nodes: {}  |  Total Heartbeats: {}  |  Jobs Q/L/R/S/F: {}/{}/{}/{}/{}",
+        "Active: {}  |  Stale: {}  |  Evicted: {}  |  Total Nodes: {}  |  Total Heartbeats: {}  |  Jobs Q/L/R/S/F: {}/{}/{}/{}/{}  |  Queued H/N/L: {}/{}/{}",
         snapshot.healthy_nodes,
         snapshot.stale_nodes,
         snapshot.total_evicted_nodes,
@@ -488,6 +514,9 @@ fn render_dashboard(frame: &mut ratatui::Frame, snapshot: &DashboardSnapshot) {
         snapshot.running_jobs,
         snapshot.succeeded_jobs,
         snapshot.failed_jobs,
+        snapshot.queued_high_jobs,
+        snapshot.queued_normal_jobs,
+        snapshot.queued_low_jobs,
     ))
     .block(
         Block::default()
@@ -557,7 +586,14 @@ fn render_dashboard(frame: &mut ratatui::Frame, snapshot: &DashboardSnapshot) {
             .recent_jobs
             .iter()
             .take(3)
-            .map(|job| format!("{}  [{}]", job.job_id, job.state.as_str()))
+            .map(|job| {
+                format!(
+                    "{}  [{} | {}]",
+                    job.job_id,
+                    job.state.as_str(),
+                    job.priority.as_str()
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n")
     };
@@ -1267,6 +1303,9 @@ mod tests {
         assert_eq!(snapshot.healthy_nodes, 0);
         assert_eq!(snapshot.stale_nodes, 0);
         assert_eq!(snapshot.queued_jobs, 0);
+        assert_eq!(snapshot.queued_high_jobs, 0);
+        assert_eq!(snapshot.queued_normal_jobs, 0);
+        assert_eq!(snapshot.queued_low_jobs, 0);
         assert_eq!(snapshot.leased_jobs, 0);
         assert_eq!(snapshot.running_jobs, 0);
         assert_eq!(snapshot.succeeded_jobs, 0);
@@ -1429,11 +1468,77 @@ mod tests {
         let snapshot = build_dashboard_snapshot(&state, &jobs, 0, 0, STALE_AFTER);
 
         assert_eq!(snapshot.queued_jobs, 1);
+        assert_eq!(snapshot.queued_high_jobs, 0);
+        assert_eq!(snapshot.queued_normal_jobs, 1);
+        assert_eq!(snapshot.queued_low_jobs, 0);
         assert_eq!(snapshot.leased_jobs, 1);
         assert_eq!(snapshot.running_jobs, 1);
         assert_eq!(snapshot.succeeded_jobs, 1);
         assert_eq!(snapshot.failed_jobs, 1);
         assert_eq!(snapshot.recent_jobs[0].job_id, "job-000005");
+    }
+
+    #[test]
+    fn build_dashboard_snapshot_counts_queued_priorities() {
+        let state = DashMap::new();
+        let jobs = DashMap::new();
+        let now = Instant::now();
+
+        jobs.insert(
+            "job-000010".to_string(),
+            JobRecord {
+                job_id: "job-000010".to_string(),
+                kind: "simulated".to_string(),
+                payload: "{}".to_string(),
+                required_capabilities: Vec::new(),
+                priority: JobPriority::High,
+                state: JobState::Queued,
+                lease: None,
+                output: None,
+                error: None,
+                created_at: now,
+                updated_at: now,
+            },
+        );
+        jobs.insert(
+            "job-000011".to_string(),
+            JobRecord {
+                job_id: "job-000011".to_string(),
+                kind: "simulated".to_string(),
+                payload: "{}".to_string(),
+                required_capabilities: Vec::new(),
+                priority: JobPriority::Normal,
+                state: JobState::Queued,
+                lease: None,
+                output: None,
+                error: None,
+                created_at: now,
+                updated_at: now,
+            },
+        );
+        jobs.insert(
+            "job-000012".to_string(),
+            JobRecord {
+                job_id: "job-000012".to_string(),
+                kind: "simulated".to_string(),
+                payload: "{}".to_string(),
+                required_capabilities: Vec::new(),
+                priority: JobPriority::Low,
+                state: JobState::Queued,
+                lease: None,
+                output: None,
+                error: None,
+                created_at: now,
+                updated_at: now,
+            },
+        );
+
+        let snapshot = build_dashboard_snapshot(&state, &jobs, 0, 0, STALE_AFTER);
+
+        assert_eq!(snapshot.queued_jobs, 3);
+        assert_eq!(snapshot.queued_high_jobs, 1);
+        assert_eq!(snapshot.queued_normal_jobs, 1);
+        assert_eq!(snapshot.queued_low_jobs, 1);
     }
 
     #[test]
