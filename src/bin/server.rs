@@ -542,11 +542,62 @@ impl JobService for MyNodeService {
 
     async fn report_job_result(
         &self,
-        _request: Request<ReportJobResultRequest>,
+        request: Request<ReportJobResultRequest>,
     ) -> Result<Response<ReportJobResultResponse>, Status> {
-        Err(Status::unimplemented(
-            "job result reporting is not implemented yet in this sprint step",
-        ))
+        let req = request.into_inner();
+
+        if req.worker_id.trim().is_empty() {
+            return Err(Status::invalid_argument("worker_id cannot be empty"));
+        }
+        if req.job_id.trim().is_empty() {
+            return Err(Status::invalid_argument("job_id cannot be empty"));
+        }
+
+        let mut job = self
+            .jobs
+            .get_mut(&req.job_id)
+            .ok_or_else(|| Status::not_found(format!("job {} not found", req.job_id)))?;
+
+        let lease = job
+            .lease
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("job is not currently leased"))?;
+
+        if lease.worker_id != req.worker_id {
+            return Err(Status::permission_denied(
+                "worker does not own the current lease for this job",
+            ));
+        }
+
+        if matches!(job.state, JobState::Succeeded | JobState::Failed) {
+            return Err(Status::failed_precondition(
+                "job is already in a terminal state",
+            ));
+        }
+
+        if matches!(job.state, JobState::Leased) {
+            job.state = JobState::Running;
+        }
+
+        job.state = if req.success {
+            JobState::Succeeded
+        } else {
+            JobState::Failed
+        };
+        job.output = if req.output.trim().is_empty() {
+            None
+        } else {
+            Some(req.output)
+        };
+        job.error = if req.error.trim().is_empty() {
+            None
+        } else {
+            Some(req.error)
+        };
+        job.updated_at = Instant::now();
+        job.lease = None;
+
+        Ok(Response::new(ReportJobResultResponse { acknowledged: true }))
     }
 
     async fn get_job_status(
@@ -938,6 +989,88 @@ mod tests {
         assert!(!lease.has_job);
         assert!(lease.job_id.is_empty());
         assert!(lease.kind.is_empty());
+    }
+
+    #[tokio::test]
+    async fn report_job_result_moves_leased_job_to_terminal_state() {
+        let service = test_service();
+
+        let job = service
+            .submit_job(Request::new(SubmitJobRequest {
+                kind: "simulated".to_string(),
+                payload: "{}".to_string(),
+            }))
+            .await
+            .expect("submit should succeed")
+            .into_inner();
+
+        service
+            .lease_job(Request::new(LeaseJobRequest {
+                worker_id: "Worker-A".to_string(),
+            }))
+            .await
+            .expect("lease should succeed");
+
+        let report = service
+            .report_job_result(Request::new(ReportJobResultRequest {
+                worker_id: "Worker-A".to_string(),
+                job_id: job.job_id.clone(),
+                success: true,
+                output: "done".to_string(),
+                error: String::new(),
+            }))
+            .await
+            .expect("report result should succeed")
+            .into_inner();
+
+        assert!(report.acknowledged);
+
+        let status = service
+            .get_job_status(Request::new(GetJobStatusRequest {
+                job_id: job.job_id,
+            }))
+            .await
+            .expect("status request should succeed")
+            .into_inner();
+
+        assert_eq!(status.state, JobRunState::Succeeded as i32);
+        assert_eq!(status.output, "done");
+        assert!(status.assigned_worker_id.is_empty());
+        assert!(status.error.is_empty());
+    }
+
+    #[tokio::test]
+    async fn report_job_result_rejects_worker_without_lease() {
+        let service = test_service();
+
+        let job = service
+            .submit_job(Request::new(SubmitJobRequest {
+                kind: "simulated".to_string(),
+                payload: "{}".to_string(),
+            }))
+            .await
+            .expect("submit should succeed")
+            .into_inner();
+
+        service
+            .lease_job(Request::new(LeaseJobRequest {
+                worker_id: "Worker-A".to_string(),
+            }))
+            .await
+            .expect("lease should succeed");
+
+        let err = service
+            .report_job_result(Request::new(ReportJobResultRequest {
+                worker_id: "Worker-B".to_string(),
+                job_id: job.job_id,
+                success: false,
+                output: String::new(),
+                error: "failed".to_string(),
+            }))
+            .await
+            .expect_err("report should fail for non-owner worker");
+
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
     }
 
     #[test]
