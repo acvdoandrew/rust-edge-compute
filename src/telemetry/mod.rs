@@ -4,8 +4,10 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::{sleep, Duration};
 
 mod simulated;
+mod nvml;
 
 pub use simulated::SimulatedSource;
+pub use nvml::NvmlSource;
 
 #[derive(Debug, Clone)]
 pub struct GpuStats {
