@@ -12,6 +12,11 @@ pub struct GpuStats {
     pub vram_used: u64,
 }
 
+pub trait TelemetrySource: Send {
+    fn backend_name(&self) -> &'static str;
+    fn read_stats(&mut self, node_id: &str) -> anyhow::Result<GpuStats>;
+}
+
 impl fmt::Display for GpuStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let vram_as_gb = self.vram_used as f64 / 1_073_741_824.0;
