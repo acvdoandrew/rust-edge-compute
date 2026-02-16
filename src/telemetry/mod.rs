@@ -1,8 +1,11 @@
 use std::fmt::{self};
 
-use rand::prelude::*;
 use tokio::sync::{mpsc, watch};
 use tokio::time::{sleep, Duration};
+
+mod simulated;
+
+pub use simulated::SimulatedSource;
 
 #[derive(Debug, Clone)]
 pub struct GpuStats {
@@ -34,6 +37,7 @@ pub async fn run_monitoring_agent(
     sending_channel: mpsc::Sender<GpuStats>,
     node_id: String,
     shutdown_rx: watch::Receiver<bool>,
+    mut source: Box<dyn TelemetrySource>,
 ) {
     let mut shutdown_rx = shutdown_rx;
 
@@ -42,11 +46,26 @@ pub async fn run_monitoring_agent(
             break;
         }
 
-        let gpu_info = GpuStats {
-            id: node_id.clone(),
-            temperature: rand::thread_rng().gen_range(40.0..90.0),
-            usage: rand::thread_rng().gen_range(0.0..1.0),
-            vram_used: rand::thread_rng().gen_range(1_000_000_000..24_000_000_000),
+        let gpu_info = match source.read_stats(&node_id) {
+            Ok(gpu_info) => gpu_info,
+            Err(err) => {
+                eprintln!(
+                    "telemetry read failed for {} (backend={}): {err}",
+                    node_id,
+                    source.backend_name()
+                );
+
+                tokio::select! {
+                    _ = sleep(Duration::from_millis(1000)) => {}
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                }
+
+                continue;
+            }
         };
 
         if sending_channel.send(gpu_info).await.is_err() {

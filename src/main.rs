@@ -48,10 +48,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (tx, mut rx) = mpsc::channel(32);
+    let telemetry_source: Box<dyn telemetry::TelemetrySource> =
+        Box::new(telemetry::SimulatedSource::new());
     let telemetry_task = tokio::spawn(telemetry::run_monitoring_agent(
         tx,
         node_id.clone(),
         shutdown_rx.clone(),
+        telemetry_source,
     ));
 
     let shared_state = Arc::new(Mutex::new(None));
