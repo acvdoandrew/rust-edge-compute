@@ -116,6 +116,21 @@ grpcurl -plaintext -import-path proto -proto node.proto \
   localhost:50051 node.JobService/SubmitJob
 ```
 
+Or use the built-in CLI:
+
+```bash
+# Submit
+cargo run --bin jobctl -- submit --kind simulated --payload '{"task":"demo"}' --priority high
+
+# Submit with scheduling constraints
+cargo run --bin jobctl -- submit --kind simulated --payload '{"task":"gpu-only"}' --require telemetry:nvml --priority high
+
+# Check status / stream until terminal state / cancel
+cargo run --bin jobctl -- status job-000001
+cargo run --bin jobctl -- watch job-000001
+cargo run --bin jobctl -- cancel job-000001 --reason "operator stop"
+```
+
 What to expect:
 - Workers poll `LeaseJob`, execute `kind=simulated`, then send `ReportJobResult`.
 - Workers advertise capabilities (for example `telemetry:simulated` or `telemetry:nvml`) during lease polling.
