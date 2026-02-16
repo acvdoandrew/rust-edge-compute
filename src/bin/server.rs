@@ -822,6 +822,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::oneshot;
+    use tokio::time::timeout;
+    use tonic::transport::Server;
 
     fn test_service() -> MyNodeService {
         MyNodeService {
@@ -848,6 +851,46 @@ mod tests {
             uptime_seconds,
             client_version: client_version.to_string(),
         }
+    }
+
+    async fn spawn_job_service_server(
+        service: MyNodeService,
+    ) -> (
+        node::job_service_client::JobServiceClient<tonic::transport::Channel>,
+        oneshot::Sender<()>,
+        tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+    ) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("read bound addr");
+        drop(listener);
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server_task = tokio::spawn(async move {
+            Server::builder()
+                .add_service(JobServiceServer::new(service))
+                .serve_with_shutdown(addr, async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+        });
+
+        let client = node::job_service_client::JobServiceClient::connect(format!("http://{addr}"))
+            .await
+            .expect("connect job service client");
+
+        (client, shutdown_tx, server_task)
+    }
+
+    async fn stop_job_service_server(
+        shutdown_tx: oneshot::Sender<()>,
+        server_task: tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+    ) {
+        let _ = shutdown_tx.send(());
+        timeout(Duration::from_secs(8), server_task)
+            .await
+            .expect("server task timed out")
+            .expect("server task join failed")
+            .expect("server returned error");
     }
 
     #[test]
@@ -1297,6 +1340,72 @@ mod tests {
             .expect_err("report should fail for non-owner worker");
 
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn grpc_happy_path_submit_lease_and_complete_job() {
+        let service = test_service();
+        let (mut client, shutdown_tx, server_task) = spawn_job_service_server(service.clone()).await;
+
+        let submit = client
+            .submit_job(Request::new(SubmitJobRequest {
+                kind: "simulated".to_string(),
+                payload: "{\"work\":1}".to_string(),
+            }))
+            .await
+            .expect("submit should succeed")
+            .into_inner();
+
+        let leased = client
+            .lease_job(Request::new(LeaseJobRequest {
+                worker_id: "Worker-IT-A".to_string(),
+            }))
+            .await
+            .expect("lease should succeed")
+            .into_inner();
+
+        assert!(leased.has_job);
+        assert_eq!(leased.job_id, submit.job_id);
+
+        let leased_status = client
+            .get_job_status(Request::new(GetJobStatusRequest {
+                job_id: submit.job_id.clone(),
+            }))
+            .await
+            .expect("leased status should succeed")
+            .into_inner();
+
+        assert_eq!(leased_status.state, JobRunState::Leased as i32);
+        assert_eq!(leased_status.assigned_worker_id, "Worker-IT-A");
+
+        let report = client
+            .report_job_result(Request::new(ReportJobResultRequest {
+                worker_id: "Worker-IT-A".to_string(),
+                job_id: submit.job_id.clone(),
+                success: true,
+                output: "integration-ok".to_string(),
+                error: String::new(),
+            }))
+            .await
+            .expect("report should succeed")
+            .into_inner();
+
+        assert!(report.acknowledged);
+
+        let done_status = client
+            .get_job_status(Request::new(GetJobStatusRequest {
+                job_id: submit.job_id,
+            }))
+            .await
+            .expect("final status should succeed")
+            .into_inner();
+
+        assert_eq!(done_status.state, JobRunState::Succeeded as i32);
+        assert!(done_status.assigned_worker_id.is_empty());
+        assert_eq!(done_status.output, "integration-ok");
+        assert!(done_status.error.is_empty());
+
+        stop_job_service_server(shutdown_tx, server_task).await;
     }
 
     #[test]
