@@ -6,6 +6,7 @@ use tokio::sync::watch;
 use tokio::time::sleep;
 
 mod backoff;
+use backoff::ExponentialBackoff;
 
 pub mod node {
     tonic::include_proto!("node");
@@ -21,10 +22,25 @@ pub async fn start_client(
     shutdown_rx: watch::Receiver<bool>,
 ) {
     let mut shutdown_rx = shutdown_rx;
+    let mut reconnect_backoff = ExponentialBackoff::new(Duration::from_secs(1), Duration::from_secs(30));
+    let mut should_backoff = false;
 
     loop {
         if *shutdown_rx.borrow() {
             break;
+        }
+
+        if should_backoff {
+            let delay = reconnect_backoff.next_delay();
+
+            tokio::select! {
+                _ = sleep(delay) => {}
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+            }
         }
 
         let connect_result = tokio::select! {
@@ -39,56 +55,54 @@ pub async fn start_client(
         };
 
         match connect_result {
-            Some(Ok(mut client)) => loop {
-                if *shutdown_rx.borrow() {
-                    let _ = client
-                        .disconnect(tonic::Request::new(DisconnectRequest {
-                            node_id: node_id.clone(),
-                        }))
-                        .await;
-                    return;
-                }
+            Some(Ok(mut client)) => {
+                reconnect_backoff.reset();
 
-                let temp = {
-                    let lock = state.lock().unwrap();
-                    match &*lock {
-                        Some(s) => s.temperature,
-                        None => 0.0,
+                loop {
+                    if *shutdown_rx.borrow() {
+                        let _ = client
+                            .disconnect(tonic::Request::new(DisconnectRequest {
+                                node_id: node_id.clone(),
+                            }))
+                            .await;
+                        return;
                     }
-                };
 
-                let request = tonic::Request::new(HeartbeatRequest {
-                    node_id: node_id.clone(),
-                    gpu_temp: temp,
-                });
+                    let temp = {
+                        let lock = state.lock().unwrap();
+                        match &*lock {
+                            Some(s) => s.temperature,
+                            None => 0.0,
+                        }
+                    };
 
-                if let Err(_) = client.heartbeat(request).await {
-                    break;
-                }
+                    let request = tonic::Request::new(HeartbeatRequest {
+                        node_id: node_id.clone(),
+                        gpu_temp: temp,
+                    });
 
-                tokio::select! {
-                    _ = sleep(Duration::from_secs(2)) => {}
-                    changed = shutdown_rx.changed() => {
-                        if changed.is_err() || *shutdown_rx.borrow() {
-                            let _ = client
-                                .disconnect(tonic::Request::new(DisconnectRequest {
-                                    node_id: node_id.clone(),
-                                }))
-                                .await;
-                            return;
+                    if client.heartbeat(request).await.is_err() {
+                        should_backoff = true;
+                        break;
+                    }
+
+                    tokio::select! {
+                        _ = sleep(Duration::from_secs(2)) => {}
+                        changed = shutdown_rx.changed() => {
+                            if changed.is_err() || *shutdown_rx.borrow() {
+                                let _ = client
+                                    .disconnect(tonic::Request::new(DisconnectRequest {
+                                        node_id: node_id.clone(),
+                                    }))
+                                    .await;
+                                return;
+                            }
                         }
                     }
                 }
-            },
+            }
             Some(Err(_)) => {
-                tokio::select! {
-                    _ = sleep(Duration::from_secs(5)) => {}
-                    changed = shutdown_rx.changed() => {
-                        if changed.is_err() || *shutdown_rx.borrow() {
-                            break;
-                        }
-                    }
-                }
+                should_backoff = true;
             }
             None => break,
         }

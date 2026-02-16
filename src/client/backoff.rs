@@ -54,10 +54,6 @@ impl ExponentialBackoff {
         self.attempt = 0;
     }
 
-    pub fn attempt(&self) -> u32 {
-        self.attempt
-    }
-
     pub fn current_delay_without_jitter(&self) -> Duration {
         let base_ms = self.base.as_millis();
         let cap_ms = self.cap.as_millis();
