@@ -38,6 +38,10 @@ struct Args {
 struct NodeStatus {
     node_id: String,
     last_temp_c: f32,
+    last_usage: f32,
+    last_vram_used_bytes: u64,
+    last_uptime_seconds: u64,
+    client_version: String,
     last_seen: Instant,
     heartbeat_count: u64,
 }
@@ -61,6 +65,10 @@ impl NodeHealth {
 struct NodeRow {
     node_id: String,
     last_temp_c: f32,
+    last_usage: f32,
+    last_vram_used_bytes: u64,
+    last_uptime_seconds: u64,
+    client_version: String,
     last_seen_secs: u64,
     heartbeat_count: u64,
     health: NodeHealth,
@@ -85,12 +93,20 @@ fn update_node_status(
     state: &DashMap<String, NodeStatus>,
     node_id: &str,
     gpu_temp: f32,
+    gpu_usage: f32,
+    vram_used_bytes: u64,
+    uptime_seconds: u64,
+    client_version: &str,
     now: Instant,
 ) {
     match state.entry(node_id.to_string()) {
         Entry::Occupied(mut entry) => {
             let status = entry.get_mut();
             status.last_temp_c = gpu_temp;
+            status.last_usage = gpu_usage;
+            status.last_vram_used_bytes = vram_used_bytes;
+            status.last_uptime_seconds = uptime_seconds;
+            status.client_version = client_version.to_string();
             status.last_seen = now;
             status.heartbeat_count += 1;
         }
@@ -98,6 +114,10 @@ fn update_node_status(
             entry.insert(NodeStatus {
                 node_id: node_id.to_string(),
                 last_temp_c: gpu_temp,
+                last_usage: gpu_usage,
+                last_vram_used_bytes: vram_used_bytes,
+                last_uptime_seconds: uptime_seconds,
+                client_version: client_version.to_string(),
                 last_seen: now,
                 heartbeat_count: 1,
             });
@@ -141,6 +161,10 @@ fn build_dashboard_snapshot(
         rows.push(NodeRow {
             node_id: status.node_id.clone(),
             last_temp_c: status.last_temp_c,
+            last_usage: status.last_usage,
+            last_vram_used_bytes: status.last_vram_used_bytes,
+            last_uptime_seconds: status.last_uptime_seconds,
+            client_version: status.client_version.clone(),
             last_seen_secs: age.as_secs(),
             heartbeat_count: status.heartbeat_count,
             health,
@@ -197,28 +221,40 @@ fn render_dashboard(frame: &mut ratatui::Frame, snapshot: &DashboardSnapshot) {
         Row::new(vec![
             Cell::from(row.node_id.clone()),
             Cell::from(format!("{:.1}", row.last_temp_c)),
+            Cell::from(format!("{:.0}%", row.last_usage * 100.0)),
+            Cell::from(format!("{:.2}", row.last_vram_used_bytes as f64 / 1_073_741_824.0)),
+            Cell::from(format!("{}s", row.last_uptime_seconds)),
             Cell::from(format!("{}s ago", row.last_seen_secs)),
             Cell::from(row.health.as_str()).style(status_style),
             Cell::from(row.heartbeat_count.to_string()),
+            Cell::from(row.client_version.clone()),
         ])
     });
 
     let table = Table::new(
         table_rows,
         [
-            Constraint::Length(20),
+            Constraint::Length(16),
+            Constraint::Length(9),
+            Constraint::Length(8),
             Constraint::Length(10),
+            Constraint::Length(9),
             Constraint::Length(12),
             Constraint::Length(10),
-            Constraint::Min(10),
+            Constraint::Length(11),
+            Constraint::Min(8),
         ],
     )
     .header(Row::new([
         "Node ID",
         "Temp (C)",
+        "Usage",
+        "VRAM (GiB)",
+        "Uptime",
         "Last Seen",
         "Status",
         "Heartbeats",
+        "Version",
     ]))
     .block(
         Block::default()
@@ -292,7 +328,16 @@ impl NodeService for MyNodeService {
         let req = request.into_inner();
         let now = Instant::now();
 
-        update_node_status(&self.state, &req.node_id, req.gpu_temp, now);
+        update_node_status(
+            &self.state,
+            &req.node_id,
+            req.gpu_temp,
+            req.gpu_usage,
+            req.vram_used_bytes,
+            req.uptime_seconds,
+            &req.client_version,
+            now,
+        );
         self.total_heartbeats.fetch_add(1, Ordering::Relaxed);
 
         Ok(Response::new(HeartbeatResponse { acknowledged: true }))
@@ -378,8 +423,8 @@ mod tests {
         let first = Instant::now();
         let second = first + Duration::from_secs(2);
 
-        update_node_status(&state, "Node-1", 63.5, first);
-        update_node_status(&state, "Node-1", 71.2, second);
+        update_node_status(&state, "Node-1", 63.5, 0.44, 2_000_000_000, 120, "0.1.0", first);
+        update_node_status(&state, "Node-1", 71.2, 0.86, 4_000_000_000, 122, "0.1.0", second);
 
         let node = state.get("Node-1").expect("node should exist");
         assert_eq!(node.heartbeat_count, 2);
@@ -422,6 +467,10 @@ mod tests {
             NodeStatus {
                 node_id: "Node-B".to_string(),
                 last_temp_c: 60.0,
+                last_usage: 0.52,
+                last_vram_used_bytes: 3_000_000_000,
+                last_uptime_seconds: 40,
+                client_version: "0.1.0".to_string(),
                 last_seen: now - Duration::from_secs(3),
                 heartbeat_count: 4,
             },
@@ -431,6 +480,10 @@ mod tests {
             NodeStatus {
                 node_id: "Node-A".to_string(),
                 last_temp_c: 80.0,
+                last_usage: 0.12,
+                last_vram_used_bytes: 1_000_000_000,
+                last_uptime_seconds: 99,
+                client_version: "0.1.0".to_string(),
                 last_seen: now - Duration::from_secs(15),
                 heartbeat_count: 1,
             },
@@ -456,6 +509,10 @@ mod tests {
             NodeStatus {
                 node_id: "Node-X".to_string(),
                 last_temp_c: 55.0,
+                last_usage: 0.33,
+                last_vram_used_bytes: 2_400_000_000,
+                last_uptime_seconds: 12,
+                client_version: "0.1.0".to_string(),
                 last_seen: Instant::now(),
                 heartbeat_count: 3,
             },
