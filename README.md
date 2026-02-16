@@ -19,7 +19,7 @@ This system uses an asynchronous **Actor Model** architecture to decouple data g
 
 ## 🚀 Features
 
-*   **Distributed Orchestration:** A central Server (`bin/server`) handling concurrent connections from multiple Nodes.
+*   **Distributed Orchestration:** A central Server (`edge server`) handling concurrent connections from multiple Nodes.
 *   **High-Performance TUI:** Real-time client and orchestrator dashboards powered by `ratatui` v0.29.
 *   **Pluggable Telemetry HAL:** Runtime-selectable telemetry backend (`--telemetry-backend sim|nvml|amd-sysfs|auto`) with deterministic `auto` fallback.
 *   **Fault Tolerance:** Client reconnects with jittered exponential backoff (capped) and resets the backoff after a successful reconnect.
@@ -39,36 +39,52 @@ This system uses an asynchronous **Actor Model** architecture to decouple data g
 
 **Prerequisite:** Cargo (Rust Toolchain)
 
+Recommended CLI entrypoint:
+
+```bash
+cargo run --bin edge -- --help
+```
+
+Optional local install for shorter commands:
+
+```bash
+cargo install --path .
+edge --help
+```
+
 ### 1. Start the Orchestrator (Server)
 Open a terminal and launch the control plane. It will listen on `[::1]:50051`.
 
 ```bash
-cargo run --bin server
+cargo run --bin edge -- server
 ```
 
 ### 2. Launch Worker Nodes (Client)
 Open a **new terminal tab** (or multiple) to spin up worker nodes.
 ```bash
 # Standard run (Random ID, connects to localhost)
-cargo run --bin rust-edge-compute
+cargo run --bin edge -- node
 
 # Custom configuration (Optional)
-cargo run --bin rust-edge-compute -- --id "Worker-01" --server "http://127.0.0.1:50051" --telemetry-backend auto
+cargo run --bin edge -- node --id "Worker-01" --server "http://127.0.0.1:50051" --profile auto
 
 # Force simulated telemetry
-cargo run --bin rust-edge-compute -- --telemetry-backend sim
+cargo run --bin edge -- node --profile sim
 
 # Force NVML telemetry (fails fast if NVML/GPU is unavailable)
-cargo run --bin rust-edge-compute -- --telemetry-backend nvml
+cargo run --bin edge -- node --profile nvml
 
 # Force AMD Linux sysfs telemetry (fails fast if amdgpu sysfs is unavailable)
-cargo run --bin rust-edge-compute -- --telemetry-backend amd-sysfs
+cargo run --bin edge -- node --profile amd-sysfs
 
 # Select a specific GPU index (cardN for amd-sysfs, device index for nvml)
-cargo run --bin rust-edge-compute -- --telemetry-backend auto --gpu-index 1
+cargo run --bin edge -- node --profile auto --gpu-index 1
 ```
 * **Observe**: The Client TUI will launch, displaying live stats.
 * **Verify**: Check the Server TUI table. Connected node rows, heartbeat counters, usage, VRAM, uptime, and version should update in real time.
+
+Compatibility note:
+- Legacy binaries (`server`, `rust-edge-compute`, `jobctl`) still work; `edge` is now the preferred interface.
 
 ### 3. Scripted Smoke Demo
 Run the helper script for either a live visual demo or an automated smoke run.
@@ -120,15 +136,15 @@ Or use the built-in CLI:
 
 ```bash
 # Submit
-cargo run --bin jobctl -- submit --kind simulated --payload '{"task":"demo"}' --priority high
+cargo run --bin edge -- job submit --kind simulated --payload '{"task":"demo"}' --priority high
 
 # Submit with scheduling constraints
-cargo run --bin jobctl -- submit --kind simulated --payload '{"task":"gpu-only"}' --require telemetry:nvml --priority high
+cargo run --bin edge -- job submit --kind simulated --payload '{"task":"gpu-only"}' --require telemetry:nvml --priority high
 
 # Check status / stream until terminal state / cancel
-cargo run --bin jobctl -- status job-000001
-cargo run --bin jobctl -- watch job-000001
-cargo run --bin jobctl -- cancel job-000001 --reason "operator stop"
+cargo run --bin edge -- job status job-000001
+cargo run --bin edge -- job watch job-000001
+cargo run --bin edge -- job cancel job-000001 --reason "operator stop"
 ```
 
 What to expect:
