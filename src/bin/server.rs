@@ -219,6 +219,47 @@ fn prune_stale_nodes(
         .count()
 }
 
+fn requeue_expired_jobs(jobs: &DashMap<String, JobRecord>, now: Instant) -> usize {
+    let expired_job_ids: Vec<String> = jobs
+        .iter()
+        .filter_map(|entry| {
+            let job = entry.value();
+            let is_leased_state = matches!(job.state, JobState::Leased | JobState::Running);
+            let is_expired = job
+                .lease
+                .as_ref()
+                .map(|lease| lease.is_expired(now))
+                .unwrap_or(false);
+
+            if is_leased_state && is_expired {
+                Some(job.job_id.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut requeued = 0usize;
+    for job_id in expired_job_ids {
+        if let Some(mut job) = jobs.get_mut(&job_id) {
+            let expired = job
+                .lease
+                .as_ref()
+                .map(|lease| lease.is_expired(now))
+                .unwrap_or(false);
+
+            if expired && matches!(job.state, JobState::Leased | JobState::Running) {
+                job.state = JobState::Queued;
+                job.lease = None;
+                job.updated_at = now;
+                requeued += 1;
+            }
+        }
+    }
+
+    requeued
+}
+
 fn build_dashboard_snapshot(
     state: &DashMap<String, NodeStatus>,
     total_heartbeats: u64,
@@ -358,6 +399,7 @@ fn render_dashboard(frame: &mut ratatui::Frame, snapshot: &DashboardSnapshot) {
 async fn run_dashboard(
     state: Arc<DashMap<String, NodeStatus>>,
     total_heartbeats: Arc<AtomicU64>,
+    jobs: Arc<DashMap<String, JobRecord>>,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
 ) -> Result<(), Box<dyn Error>> {
@@ -366,6 +408,7 @@ async fn run_dashboard(
         &mut terminal,
         state,
         total_heartbeats,
+        jobs,
         shutdown_tx,
         shutdown_rx,
     )
@@ -378,6 +421,7 @@ async fn run_dashboard_loop(
     terminal: &mut ratatui::DefaultTerminal,
     state: Arc<DashMap<String, NodeStatus>>,
     total_heartbeats: Arc<AtomicU64>,
+    jobs: Arc<DashMap<String, JobRecord>>,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
 ) -> Result<(), Box<dyn Error>> {
@@ -393,6 +437,7 @@ async fn run_dashboard_loop(
             Instant::now(),
             EVICT_AFTER,
         ) as u64);
+        let _ = requeue_expired_jobs(&jobs, Instant::now());
 
         let snapshot = build_dashboard_snapshot(
             &state,
@@ -485,6 +530,9 @@ impl JobService for MyNodeService {
             return Err(Status::invalid_argument("worker_id cannot be empty"));
         }
 
+        let now = Instant::now();
+        let _ = requeue_expired_jobs(&self.jobs, now);
+
         let Some(job_id) = self
             .jobs
             .iter()
@@ -507,7 +555,6 @@ impl JobService for MyNodeService {
             }));
         };
 
-        let now = Instant::now();
         let mut job = self
             .jobs
             .get_mut(&job_id)
@@ -677,6 +724,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let dashboard_result = run_dashboard(
         state,
         total_heartbeats,
+        jobs,
         shutdown_tx.clone(),
         shutdown_rx.clone(),
     )
@@ -1084,5 +1132,65 @@ mod tests {
 
         assert!(!lease.is_expired(start + Duration::from_secs(10)));
         assert!(lease.is_expired(start + Duration::from_secs(11)));
+    }
+
+    #[test]
+    fn requeue_expired_jobs_returns_lease_to_queue() {
+        let jobs = DashMap::new();
+        let now = Instant::now();
+
+        jobs.insert(
+            "job-000001".to_string(),
+            JobRecord {
+                job_id: "job-000001".to_string(),
+                kind: "simulated".to_string(),
+                payload: "{}".to_string(),
+                state: JobState::Leased,
+                lease: Some(JobLease {
+                    worker_id: "Worker-A".to_string(),
+                    leased_at: now - Duration::from_secs(20),
+                    lease_timeout: Duration::from_secs(10),
+                }),
+                output: None,
+                error: None,
+                created_at: now - Duration::from_secs(30),
+                updated_at: now - Duration::from_secs(20),
+            },
+        );
+
+        jobs.insert(
+            "job-000002".to_string(),
+            JobRecord {
+                job_id: "job-000002".to_string(),
+                kind: "simulated".to_string(),
+                payload: "{}".to_string(),
+                state: JobState::Leased,
+                lease: Some(JobLease {
+                    worker_id: "Worker-B".to_string(),
+                    leased_at: now - Duration::from_secs(3),
+                    lease_timeout: Duration::from_secs(10),
+                }),
+                output: None,
+                error: None,
+                created_at: now - Duration::from_secs(10),
+                updated_at: now - Duration::from_secs(3),
+            },
+        );
+
+        let requeued = requeue_expired_jobs(&jobs, now);
+
+        assert_eq!(requeued, 1);
+
+        let expired_job = jobs
+            .get("job-000001")
+            .expect("expired job should still exist in map");
+        assert_eq!(expired_job.state, JobState::Queued);
+        assert!(expired_job.lease.is_none());
+
+        let fresh_job = jobs
+            .get("job-000002")
+            .expect("fresh leased job should still exist in map");
+        assert_eq!(fresh_job.state, JobState::Leased);
+        assert!(fresh_job.lease.is_some());
     }
 }
