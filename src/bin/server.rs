@@ -25,6 +25,7 @@ use node::{DisconnectRequest, DisconnectResponse, HeartbeatRequest, HeartbeatRes
 
 const DEFAULT_BIND_ADDR: &str = "[::1]:50051";
 const STALE_AFTER: Duration = Duration::from_secs(10);
+const EVICT_AFTER: Duration = Duration::from_secs(60);
 const FRAME_POLL: Duration = Duration::from_millis(100);
 
 #[derive(Parser, Debug)]
@@ -136,6 +137,26 @@ fn node_health(last_seen: Instant, now: Instant, stale_after: Duration) -> NodeH
     } else {
         NodeHealth::Healthy
     }
+}
+
+fn prune_stale_nodes(state: &DashMap<String, NodeStatus>, now: Instant, evict_after: Duration) -> usize {
+    let keys_to_remove: Vec<String> = state
+        .iter()
+        .filter_map(|entry| {
+            let status = entry.value();
+            let age = now.saturating_duration_since(status.last_seen);
+            if age > evict_after {
+                Some(entry.key().clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    keys_to_remove
+        .iter()
+        .filter(|node_id| state.remove(*node_id).is_some())
+        .count()
 }
 
 fn build_dashboard_snapshot(
@@ -298,6 +319,8 @@ async fn run_dashboard_loop(
         if *shutdown_rx.borrow() {
             break;
         }
+
+        let _ = prune_stale_nodes(&state, Instant::now(), EVICT_AFTER);
 
         let snapshot = build_dashboard_snapshot(
             &state,
