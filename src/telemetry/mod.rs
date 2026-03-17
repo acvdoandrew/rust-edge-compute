@@ -1,7 +1,7 @@
 use std::fmt::{self};
 
 use tokio::sync::{mpsc, watch};
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 mod amd_sysfs;
 mod nvml;

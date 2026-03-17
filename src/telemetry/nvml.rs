@@ -1,5 +1,5 @@
 use anyhow::Context;
-use nvml_wrapper::{enum_wrappers::device::TemperatureSensor, Nvml};
+use nvml_wrapper::{Nvml, enum_wrappers::device::TemperatureSensor};
 
 use super::{GpuStats, TelemetrySource};
 

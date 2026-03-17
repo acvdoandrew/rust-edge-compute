@@ -41,7 +41,7 @@ fn resolve_card_device_path_in(drm_class_root: &Path, gpu_index: u32) -> anyhow:
     Ok(card_device_path)
 }
 
-fn ensure_amdgpu_driver(card_device_path: &PathBuf) -> anyhow::Result<()> {
+fn ensure_amdgpu_driver(card_device_path: &Path) -> anyhow::Result<()> {
     let uevent_path = card_device_path.join("uevent");
     let uevent = fs::read_to_string(&uevent_path)
         .with_context(|| format!("failed to read {}", uevent_path.display()))?;
@@ -166,7 +166,7 @@ mod tests {
         fs::write(tmp.path().join("uevent"), "DRIVER=nouveau\n")
             .expect("failed to write fake uevent");
 
-        let result = ensure_amdgpu_driver(&tmp.path().to_path_buf());
+        let result = ensure_amdgpu_driver(tmp.path());
 
         assert!(result.is_err());
     }

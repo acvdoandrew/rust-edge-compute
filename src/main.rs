@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::Context;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
-use rand::Rng;
+use rand::RngExt;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Style},
@@ -111,7 +111,7 @@ where
                     ),
                 )),
             },
-        }
+        },
     }
 }
 
@@ -131,7 +131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let node_id = args
         .node_id
-        .unwrap_or_else(|| format!("Node-{}", rand::thread_rng().gen_range(1000..9999)));
+        .unwrap_or_else(|| format!("Node-{}", rand::rng().random_range(1000..9999)));
 
     println!("🚀 Edge Compute Node Initializing ID: {}...", node_id);
     println!(
@@ -191,13 +191,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             app_state.should_quit = true;
         }
 
-        if crossterm::event::poll(Duration::from_millis(16))? {
-            if let Event::Key(key) = crossterm::event::read()? {
-                if is_quit_key(key) {
-                    let _ = shutdown_tx.send(true);
-                    app_state.should_quit = true;
-                }
-            }
+        if crossterm::event::poll(Duration::from_millis(16))?
+            && let Event::Key(key) = crossterm::event::read()?
+            && is_quit_key(key)
+        {
+            let _ = shutdown_tx.send(true);
+            app_state.should_quit = true;
         }
 
         match rx.try_recv() {
@@ -339,7 +338,7 @@ mod tests {
             || Err(anyhow!("nvml unavailable")),
             || Err(anyhow!("amd unavailable")),
         )
-            .expect("auto backend should fall back to simulated source");
+        .expect("auto backend should fall back to simulated source");
 
         assert_eq!(source.backend_name(), "simulated");
         assert!(status.starts_with("auto -> sim"));
@@ -365,7 +364,7 @@ mod tests {
             || Ok(fixed_source("nvml")),
             || panic!("amd factory should not be called when nvml is available"),
         )
-            .expect("auto backend should use nvml source when available");
+        .expect("auto backend should use nvml source when available");
 
         assert_eq!(status, "auto -> nvml");
         assert_eq!(source.backend_name(), "nvml");

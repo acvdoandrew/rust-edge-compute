@@ -1,20 +1,20 @@
 use std::error::Error;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc,
+    atomic::{AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 
 use clap::Parser;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use dashmap::{mapref::entry::Entry, DashMap};
+use dashmap::{DashMap, mapref::entry::Entry};
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
     widgets::{Block, Borders, Cell, Paragraph, Row, Table},
 };
 use tokio::sync::watch;
-use tonic::{transport::Server, Request, Response, Status};
+use tonic::{Request, Response, Status, transport::Server};
 
 pub mod node {
     tonic::include_proto!("node");
@@ -363,28 +363,30 @@ fn requeue_expired_jobs(jobs: &DashMap<String, JobRecord>, now: Instant) -> usiz
 
     let mut requeued = 0usize;
     for job_id in expired_job_ids {
-        if let Some(mut job) = jobs.get_mut(&job_id) {
-            let expired = job
-                .lease
-                .as_ref()
-                .map(|lease| lease.is_expired(now))
-                .unwrap_or(false);
+        let Some(mut job) = jobs.get_mut(&job_id) else {
+            continue;
+        };
 
-            if expired {
-                match job.state {
-                    JobState::Leased | JobState::Running => {
-                        job.state = JobState::Queued;
-                        job.lease = None;
-                        job.updated_at = now;
-                        requeued += 1;
-                    }
-                    JobState::CancelRequested => {
-                        job.state = JobState::Cancelled;
-                        job.lease = None;
-                        job.updated_at = now;
-                    }
-                    _ => {}
+        let expired = job
+            .lease
+            .as_ref()
+            .map(|lease| lease.is_expired(now))
+            .unwrap_or(false);
+
+        if expired {
+            match job.state {
+                JobState::Leased | JobState::Running => {
+                    job.state = JobState::Queued;
+                    job.lease = None;
+                    job.updated_at = now;
+                    requeued += 1;
                 }
+                JobState::CancelRequested => {
+                    job.state = JobState::Cancelled;
+                    job.lease = None;
+                    job.updated_at = now;
+                }
+                _ => {}
             }
         }
     }
@@ -663,13 +665,12 @@ async fn run_dashboard_loop(
         );
         terminal.draw(|frame| render_dashboard(frame, &snapshot))?;
 
-        if crossterm::event::poll(FRAME_POLL)? {
-            if let Event::Key(key) = crossterm::event::read()? {
-                if is_quit_key(key) {
-                    let _ = shutdown_tx.send(true);
-                    break;
-                }
-            }
+        if crossterm::event::poll(FRAME_POLL)?
+            && let Event::Key(key) = crossterm::event::read()?
+            && is_quit_key(key)
+        {
+            let _ = shutdown_tx.send(true);
+            break;
         }
     }
 
@@ -1219,9 +1220,9 @@ mod tests {
         let mut client = None;
         let mut last_err = None;
         for _ in 0..40 {
-            match node::job_service_client::JobServiceClient::connect(format!("http://{addr}"))
-                .await
-            {
+            let connect_result =
+                node::job_service_client::JobServiceClient::connect(format!("http://{addr}")).await;
+            match connect_result {
                 Ok(connected) => {
                     client = Some(connected);
                     break;

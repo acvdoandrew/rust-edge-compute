@@ -1,4 +1,4 @@
-use rand::Rng;
+use rand::RngExt;
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -45,7 +45,7 @@ impl ExponentialBackoff {
 
         let min = (1.0 - self.jitter_ratio).max(0.0);
         let max = 1.0 + self.jitter_ratio;
-        let multiplier = rand::thread_rng().gen_range(min..=max);
+        let multiplier = rand::rng().random_range(min..=max);
 
         scale_duration(current, multiplier)
     }

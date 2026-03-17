@@ -1,6 +1,6 @@
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
 };
 use std::time::Duration;
 
@@ -11,7 +11,7 @@ use rust_edge_compute::client::node::{
 use rust_edge_compute::telemetry::GpuStats;
 use tokio::sync::{oneshot, watch};
 use tokio::time::{sleep, timeout};
-use tonic::{transport::Server, Request, Response, Status};
+use tonic::{Request, Response, Status, transport::Server};
 
 #[derive(Default)]
 struct LifecycleState {
@@ -104,7 +104,10 @@ async fn node_client_lifecycle_emits_heartbeat_then_disconnect() {
         shared_state,
         "Node-IT".to_string(),
         format!("http://{}", addr),
-        vec!["telemetry:simulated".to_string(), "executor:simulated".to_string()],
+        vec![
+            "telemetry:simulated".to_string(),
+            "executor:simulated".to_string(),
+        ],
         client_shutdown_rx,
     ));
 

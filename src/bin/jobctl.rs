@@ -10,9 +10,7 @@ pub mod node {
 }
 
 use node::job_service_client::JobServiceClient;
-use node::{
-    CancelJobRequest, GetJobStatusRequest, JobPriority, JobRunState, SubmitJobRequest,
-};
+use node::{CancelJobRequest, GetJobStatusRequest, JobPriority, JobRunState, SubmitJobRequest};
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Job orchestration CLI", long_about = None)]
